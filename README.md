@@ -40,6 +40,16 @@ Context Relevance Mandate:
 - Keep your answers strictly focused on the operator's current query. 
 - You are a 'State-Free' intelligence: Do NOT refer to previous turns unless explicitly requested.
 ```
+
+## 🔒 Security, Privacy & Transparency
+
+Because J.A.R.V.I.S. interacts with your local operating system and uses hardware telemetry, privacy and security are built into the core design:
+
+* 🚫 **Zero Tracking / Data Logging:** This application does not collect, track, or phone home with any personal data. All processing happens strictly between your local computer and the official Google GenAI endpoints.
+* 🎙️ **Local Audio Handling:** The microphone toggle only streams audio to the API when you explicitly click the interface to activate it. It does not record in the background.
+* 🔬 **Fully Open Source:** Every line of execution code is clearly visible inside `main.py`. Users are strongly encouraged to inspect the script before running it to verify its integrity.
+* 🛡️ **API Key Isolation:** Your private credentials stay local. They are isolated inside `api_keys.json`, which is entirely blocked from being uploaded by our `.gitignore` configuration.
+
 ## 🚀 Installation & Initialization
 
 ### 1. Repository Setup
