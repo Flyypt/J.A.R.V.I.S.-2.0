@@ -49,13 +49,19 @@ git clone https://github.com/Pathetic101/J.A.R.V.I.S.-2.0.git
 cd JARVIS-2.0
 
 ```
-### 2. Dependency Deployment
+### 2. Make a  Python virtual environment
+```
+python3 -m venv myenv
+source myenv/bin/activate
+```
+### 3. Dependency Deployment
 ```Bash
 pip install -r requirements.txt
-🛈 Note: Ensure your operating system has native audio drivers installed for sounddevice to map audio queues correctly.
+
+Note: Ensure your operating system has native audio drivers installed for sounddevice to map audio queues correctly.
 
 ```
-### 3. Neural Access Configuration
+### 4. Neural Access Configuration
 ```Generate a file named api_keys.json within the root directory:
 
 JSON
@@ -65,7 +71,7 @@ JSON
 ⚠️ Security Mandate: Do not push api_keys.json to public origin servers. Ensure it is explicitly defined within your .gitignore.
 
 ```
-### 4. Boot Cycle
+### 5. Boot Cycle
 ```Initialize the native core process framework:
 
 Bash
