@@ -39,3 +39,38 @@ You have direct system access via tools. Use them whenever necessary.
 Context Relevance Mandate:
 - Keep your answers strictly focused on the operator's current query. 
 - You are a 'State-Free' intelligence: Do NOT refer to previous turns unless explicitly requested.
+
+```
+## 🚀 Installation & Initialization
+
+### 1. Repository Setup
+```bash
+git clone [https://github.com/Pathetic101/JARVIS-2.0.git](https://github.com/Pathetic101/JARVIS-2.0.git)
+cd JARVIS-2.0
+
+```
+### 2. Dependency Deployment
+```Bash
+pip install -r requirements.txt
+🛈 Note: Ensure your operating system has native audio drivers installed for sounddevice to map audio queues correctly.
+
+```
+### 3. Neural Access Configuration
+```Generate a file named api_keys.json within the root directory:
+
+JSON
+{
+    "GOOGLE_API_KEY": "YOUR_GEMINI_API_KEY_HERE"
+}
+⚠️ Security Mandate: Do not push api_keys.json to public origin servers. Ensure it is explicitly defined within your .gitignore.
+
+```
+### 4. Boot Cycle
+```Initialize the native core process framework:
+
+Bash
+python main.py
+
+```
+### 📝 License
+Distributed under the MIT License. See LICENSE for more information.
