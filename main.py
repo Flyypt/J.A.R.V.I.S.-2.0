@@ -27,18 +27,20 @@ from google.genai import types
 BASE_DIR = Path(__file__).resolve().parent
 API_CONFIG_PATH = BASE_DIR / "api_keys.json"
 
-SYSTEM_PROMPT = """
-You are J.A.R.V.I.S., a super-intelligent AI persona. 
-Your tone is sophisticated, articulate, and slightly witty.
-You have direct system access via tools. Use them whenever necessary.
-Crucial: Do not repeat your introductory greeting if the conversation is already underway. 
+SYSTEM_PROMPT = """\
+You are J.A.R.V.I.S., a super-intelligent AI persona. \
+Your tone is sophisticated, articulate, and slightly witty.\
+You have direct system access via tools. Use them whenever necessary.\
+Crucial: Do not repeat your introductory greeting if the conversation is already underway. \
 Provide concise, high-signal intelligence. Focus on accuracy and efficiency.
 
-Context Relevance Mandate:
-- Keep your answers strictly focused on the operator's current query. 
-- You are a 'State-Free' intelligence: Do NOT refer to previous turns, earlier topics, or past tool outputs (such as screenshot images, system diagnostics, or clipboard content) unless they are explicitly repeated or requested in the current prompt.
-- Treat every prompt as a standalone directive unless continuity is essential for the logic of the specific task at hand.
-- Maintain a 'clean slate' mindset to keep interactions professional and relevant.
+ABSOLUTE STATE-FREE MANDATE — STRICT ENFORCEMENT:
+- You have ZERO memory of any prior turns. Each user message is a COMPLETELY STANDALONE directive.
+- NEVER reference, repeat, build upon, or acknowledge anything from previous turns.
+- Treat every message as if the conversation has just started and the user is giving you their first command.
+- The past does not exist. Do not say "as you previously asked", "continuing from before", "as mentioned earlier", or any variant of referring to history.
+- If the user gives a new request, execute it fresh. Do not merge it with prior context.
+- Exception: Only if the user explicitly says "continue from the previous task" or similar, may you reference the immediate prior turn.
 
 Current Neural Matrix: Mark XL.
 Current Time: {time}
@@ -1237,6 +1239,8 @@ class JarvisCoreRunner:
         self.session = None
         self.resumption_token = None
         self.tool_call_pending = False
+        self.turn_complete_received = False
+        self.session_ready = asyncio.Event()
         self._running = True
         self.model_id = "gemini-3.1-flash-live-preview"
         self.voice_mode = False
@@ -1312,11 +1316,7 @@ class JarvisCoreRunner:
             # We always request "AUDIO". Toggling voice core is managed purely locally.
             modalities = ["AUDIO"]
 
-            # Set up session resumption configuration if a handle exists
-            session_resumption = None
-            if self.resumption_token:
-                session_resumption = types.SessionResumptionConfig(handle=self.resumption_token)
-
+            # Enable session resumption for fast reconnects when token available
             config = types.LiveConnectConfig(
                 response_modalities=modalities,
                 system_instruction=types.Content(parts=[types.Part.from_text(text=SYSTEM_PROMPT.format(time=datetime.now().strftime("%H:%M:%S")))]),
@@ -1325,8 +1325,10 @@ class JarvisCoreRunner:
                     voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede"))
                 ),
                 temperature=0.5,
-                sessionResumption=session_resumption
             )
+            # Attach resumption token for instant recovery on reconnect
+            if self.resumption_token:
+                config.session_resumption = types.SessionResumptionConfig(handle=self.resumption_token)
 
             try:
                 # Only signal re-linking if we don't have an active session
@@ -1335,6 +1337,7 @@ class JarvisCoreRunner:
 
                 async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
                     self.session = session
+                    self.session_ready.set()
                     self.main_win.bridge.statusUpdated.emit("READY")
                     
                     async for response in session.receive():
@@ -1343,7 +1346,8 @@ class JarvisCoreRunner:
                 
                 # If we get here, the session closed normally
                 self.session = None
-                retry_delay = 1.0
+                self.session_ready.clear()
+                retry_delay = 0.3
             except Exception as e:
                 # Log full error for diagnostics
                 import traceback
@@ -1359,7 +1363,7 @@ class JarvisCoreRunner:
                 if self._running:
                     # Only signal RE-LINKING if this was a failure
                     self.main_win.bridge.statusUpdated.emit("RE-LINKING")
-                    retry_delay = 5.0
+                    retry_delay = 1.0
                 else:
                     break
             
@@ -1367,6 +1371,7 @@ class JarvisCoreRunner:
                 await asyncio.sleep(retry_delay)
 
     def dispatch_text(self, text):
+        """Dispatch user text on the current session."""
         if self.session and self.loop and self._running:
             asyncio.run_coroutine_threadsafe(
                 self.session.send_client_content(
@@ -1385,45 +1390,51 @@ class JarvisCoreRunner:
             )
 
     async def _handle_server_response(self, response):
-        res_update = getattr(response, 'session_resumption_update', None)
-        if res_update and getattr(res_update, 'new_handle', None):
-            self.resumption_token = res_update.new_handle
+        try:
+            res_update = getattr(response, 'session_resumption_update', None)
+            if res_update and getattr(res_update, 'new_handle', None):
+                self.resumption_token = res_update.new_handle
 
-        text_content = ""
+            text_content = ""
 
-        if hasattr(response, 'server_content') and response.server_content:
-            content = response.server_content
-            if hasattr(content, 'model_turn') and content.model_turn:
-                for part in content.model_turn.parts:
-                    if hasattr(part, 'text') and part.text:
-                        text_content += part.text
-                    
-                    # Realtime PCM voice playback
-                    if getattr(part, 'inline_data', None) and part.inline_data:
-                        if self.voice_mode and self.audio_player:
-                            self.main_win.bridge.statusUpdated.emit("SPEAKING")
-                            self.audio_player.play_chunk(part.inline_data.data)
-            
-            if getattr(content, 'turn_complete', False):
-                self.main_win.bridge.statusUpdated.emit("READY")
+            if hasattr(response, 'server_content') and response.server_content:
+                content = response.server_content
+                if hasattr(content, 'model_turn') and content.model_turn:
+                    for part in content.model_turn.parts:
+                        if hasattr(part, 'text') and part.text:
+                            text_content += part.text
+                        
+                        # Realtime PCM voice playback
+                        if getattr(part, 'inline_data', None) and part.inline_data:
+                            if self.voice_mode and self.audio_player:
+                                self.main_win.bridge.statusUpdated.emit("SPEAKING")
+                                self.audio_player.play_chunk(part.inline_data.data)
+                
+                if getattr(content, 'turn_complete', False):
+                    self.turn_complete_received = True
+                    self.main_win.bridge.statusUpdated.emit("READY")
 
-            if hasattr(content, 'output_transcription') and content.output_transcription:
-                text_content += content.output_transcription.text
+                if hasattr(content, 'output_transcription') and content.output_transcription:
+                    text_content += content.output_transcription.text
 
-        if hasattr(response, 'text') and response.text:
-            text_content += response.text
+            if hasattr(response, 'text') and response.text:
+                text_content += response.text
 
-        if text_content:
-            self.main_win.bridge.logReceived.emit("JARVIS", text_content)
+            if text_content:
+                self.main_win.bridge.logReceived.emit("JARVIS", text_content)
 
-        tool_call = getattr(response, 'tool_call', None)
-        if tool_call and getattr(tool_call, 'function_calls', None):
-            self.tool_call_pending = True
-            try:
-                for call in tool_call.function_calls:
-                    await self._execute_tool_sequence(call)
-            finally:
-                self.tool_call_pending = False
+            tool_call = getattr(response, 'tool_call', None)
+            if tool_call and getattr(tool_call, 'function_calls', None):
+                self.tool_call_pending = True
+                try:
+                    for call in tool_call.function_calls:
+                        await self._execute_tool_sequence(call)
+                finally:
+                    self.tool_call_pending = False
+        except Exception as e:
+            import traceback
+            self.main_win.bridge.logReceived.emit("JARVIS", f"Response handler error (resilient): {e}")
+            traceback.print_exc()
 
     async def _execute_tool_sequence(self, call):
         name = call.name
@@ -1501,11 +1512,14 @@ class JarvisCoreRunner:
 
         # Send tool response (Upgraded to use send_tool_response to avoid deprecation warnings)
         if self.session:
-            await self.session.send_tool_response(
-                function_responses=[
-                    types.FunctionResponse(name=name, id=call_id, response={"result": result})
-                ]
-            )
+            try:
+                await self.session.send_tool_response(
+                    function_responses=[
+                        types.FunctionResponse(name=name, id=call_id, response={"result": result})
+                    ]
+                )
+            except Exception as e:
+                self.main_win.bridge.logReceived.emit("JARVIS", f"Tool response transmit failed (non-critical): {e}")
 
 class JarvisMainWindow(QMainWindow):
     def __init__(self):
@@ -1575,4 +1589,3 @@ if __name__ == "__main__":
     main_win = JarvisMainWindow()
     main_win.show()
     sys.exit(app.exec())
-
