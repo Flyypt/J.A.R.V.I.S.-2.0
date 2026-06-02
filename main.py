@@ -149,13 +149,13 @@ JARVIS_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="get_weather",
-        description="Fetches current weather conditions for a location. CALL THIS FUNCTION IMMEDIATELY AND SILENTLY whenever the user asks about weather, temperature, rain, snow, forecasts, humidity, wind, or any outdoor conditions. Do not guess, do not refuse, do not explain your decision to the user — just call this function in the same turn. Pass a city name (e.g. 'London', 'Tokyo', 'New York', 'Paris', 'San Francisco') for that specific location, or pass 'auto' (or empty string) to detect the user's current location via IP geolocation. Examples: user says 'weather in Paris?' → call get_weather(location='Paris'); user says 'is it raining?' → call get_weather(location='auto').",
+        description="CALL THIS IMMEDIATELY for any weather question (temperature, rain, forecast, wind, humidity). Pass a city name, or 'auto' / empty string to use the user's IP-detected location. Example: 'weather in Paris?' → get_weather(location='Paris').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "location": types.Schema(
                     type="STRING",
-                    description="City name to look up, or 'auto' (or empty string) to detect the user's current location. Examples: 'Tokyo', 'London', 'auto'."
+                    description="City name, or 'auto' / '' to use the user's location. Examples: 'Tokyo', 'London', 'auto'."
                 )
             }
         )
@@ -164,26 +164,26 @@ JARVIS_TOOLS = [
     # ----- Filesystem (browse the user's PC) -----
     types.FunctionDeclaration(
         name="list_directory",
-        description="Lists files and folders inside a directory on the user's PC. USE THIS whenever the user wants to see what's in a folder, browse a directory, or check what files exist. Returns a formatted listing with names, types ([DIR]/[FILE]), and sizes. Examples: 'what's in my Documents?' → call list_directory(path='~/Documents'); 'show my Desktop' → call list_directory(path='~/Desktop'); 'list my Downloads' → call list_directory(path='~/Downloads'). If no path is given, the user's home folder is used.",
+        description="USE THIS to see what's in a folder on the user's PC. Returns a sorted listing with [DIR]/[FILE] markers and sizes. Defaults to the user's home directory if path is omitted. Example: 'what's in my Documents?' → list_directory(path='~/Documents').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "path": types.Schema(
                     type="STRING",
-                    description="Directory to list. Supports ~ for the user's home directory. Defaults to home if omitted."
+                    description="Directory to list. Supports ~ for home. Defaults to home if omitted."
                 )
             }
         )
     ),
     types.FunctionDeclaration(
         name="read_file",
-        description="Reads the text content of a file. USE THIS whenever the user wants to open, view, or read a file (text-based). Returns the file content (capped at 50KB; binary files return an error). Use list_directory or search_files first to find the file. Examples: 'read my todo.txt' → call read_file(path='~/todo.txt'); 'show me notes.md' → call read_file(path='~/notes.md'); 'what's in config.yaml?' → call read_file(path='~/config.yaml').",
+        description="USE THIS to open, view, or read a text file. Returns content (capped at 50KB; binary files return an error). Use list_directory or search_files to find the file first. Example: 'read my todo.txt' → read_file(path='~/todo.txt').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "path": types.Schema(
                     type="STRING",
-                    description="Absolute path to the file. Supports ~ for the user's home directory."
+                    description="Absolute path to the file. Supports ~ for home."
                 )
             },
             required=["path"]
@@ -191,98 +191,62 @@ JARVIS_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="search_files",
-        description="Finds files by name pattern (glob) on the user's PC. USE THIS whenever the user wants to locate a file by name. Returns matching file paths. Examples: 'find all my Python files' → call search_files(pattern='*.py', directory='~'); 'locate my resume' → call search_files(pattern='*resume*', directory='~'); 'find PDFs in Documents' → call search_files(pattern='*.pdf', directory='~/Documents').",
+        description="USE THIS to find files by name pattern (glob) on the user's PC. Returns matching file paths. Example: 'find my resume' → search_files(pattern='*resume*', directory='~').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "pattern": types.Schema(
-                    type="STRING",
-                    description="Glob pattern to match file names. Examples: '*.py', '*.txt', '*report*', 'README*'."
-                ),
-                "directory": types.Schema(
-                    type="STRING",
-                    description="Where to search. Defaults to the user's home directory. Supports ~ for home."
-                ),
-                "recursive": types.Schema(
-                    type="BOOLEAN",
-                    description="If true, search subdirectories too. Default: false."
-                )
+                "pattern": types.Schema(type="STRING", description="Glob pattern. Examples: '*.py', '*.txt', '*report*'."),
+                "directory": types.Schema(type="STRING", description="Where to search. Defaults to home. Supports ~."),
+                "recursive": types.Schema(type="BOOLEAN", description="If true, search subdirectories. Default: false.")
             },
             required=["pattern"]
         )
     ),
     types.FunctionDeclaration(
         name="search_file_contents",
-        description="Searches INSIDE files for a text or regex pattern. USE THIS whenever the user wants to find content within files (e.g. 'where did I write X', 'find the API key in my code'). Returns matches as 'file:line: content'. Examples: 'find where I used TODO' → call search_file_contents(query='TODO', directory='~/projects', recursive=true); 'look for the password in my config' → call search_file_contents(query='password', directory='~', recursive=true).",
+        description="USE THIS to find a text or regex pattern INSIDE files (e.g. 'where did I write X', 'find the API key in my code'). Returns 'file:line: content' matches. Example: 'find TODO in my projects' → search_file_contents(query='TODO', directory='~/projects', recursive=true).",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "query": types.Schema(
-                    type="STRING",
-                    description="Regex pattern to search for inside files."
-                ),
-                "directory": types.Schema(
-                    type="STRING",
-                    description="Where to search. Defaults to the user's home directory."
-                ),
-                "file_glob": types.Schema(
-                    type="STRING",
-                    description="Only search files matching this glob (e.g. '*.py'). Optional."
-                ),
-                "recursive": types.Schema(
-                    type="BOOLEAN",
-                    description="If true, search subdirectories. Default: true."
-                )
+                "query": types.Schema(type="STRING", description="Regex pattern to search for inside files."),
+                "directory": types.Schema(type="STRING", description="Where to search. Defaults to home. Supports ~."),
+                "file_glob": types.Schema(type="STRING", description="Only search files matching this glob (e.g. '*.py'). Optional."),
+                "recursive": types.Schema(type="BOOLEAN", description="If true, search subdirectories. Default: true.")
             },
             required=["query"]
         )
     ),
     types.FunctionDeclaration(
         name="write_file",
-        description="Creates or overwrites a text file with the given content. USE THIS whenever the user asks to create a file, save text to a file, write a file, or update a file's contents. Auto-creates parent directories if they don't exist. Examples: 'create todo.txt with my list' → call write_file(path='~/todo.txt', content='...'); 'save this to notes.md' → call write_file(path='~/notes.md', content='...'); 'write a Python hello world' → call write_file(path='~/hello.py', content='print(\"hello\")').",
+        description="USE THIS to create a file or save text to a file. Overwrites if it exists; auto-creates parent directories. Example: 'save this to notes.md' → write_file(path='~/notes.md', content='...').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "path": types.Schema(
-                    type="STRING",
-                    description="Where to write. Supports ~ for the user's home directory. Parent directories are created automatically."
-                ),
-                "content": types.Schema(
-                    type="STRING",
-                    description="The full text content to write to the file."
-                )
+                "path": types.Schema(type="STRING", description="Where to write. Supports ~ for home. Parents auto-created."),
+                "content": types.Schema(type="STRING", description="The full text content to write.")
             },
             required=["path", "content"]
         )
     ),
     types.FunctionDeclaration(
         name="move_file",
-        description="Moves or renames a file or folder. USE THIS for 'move X to Y', 'rename X to Y', 'put X in folder Y'. Examples: 'rename old.txt to new.txt' → call move_file(source='~/old.txt', destination='~/new.txt'); 'move report.pdf to Documents' → call move_file(source='~/report.pdf', destination='~/Documents/report.pdf').",
+        description="USE THIS to move or rename a file or folder. Example: 'rename old.txt to new.txt' → move_file(source='~/old.txt', destination='~/new.txt').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "source": types.Schema(
-                    type="STRING",
-                    description="Current path of the file or folder."
-                ),
-                "destination": types.Schema(
-                    type="STRING",
-                    description="New path (the destination)."
-                )
+                "source": types.Schema(type="STRING", description="Current path of the file or folder."),
+                "destination": types.Schema(type="STRING", description="New path (the destination).")
             },
             required=["source", "destination"]
         )
     ),
     types.FunctionDeclaration(
         name="create_directory",
-        description="Creates a new folder (and any missing parent folders). USE THIS whenever the user asks to make a new folder, create a directory, or set up a project folder. Example: 'make a folder called Projects on my Desktop' → call create_directory(path='~/Desktop/Projects').",
+        description="USE THIS to make a new folder (creates parent folders if needed). Example: 'make a Projects folder on my Desktop' → create_directory(path='~/Desktop/Projects').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "path": types.Schema(
-                    type="STRING",
-                    description="Path of the directory to create. Supports ~ for the user's home directory."
-                )
+                "path": types.Schema(type="STRING", description="Path of the directory to create. Supports ~ for home.")
             },
             required=["path"]
         )
@@ -291,36 +255,24 @@ JARVIS_TOOLS = [
     # ----- Internet (general knowledge, articles, docs) -----
     types.FunctionDeclaration(
         name="web_search",
-        description="Searches the public web for information. USE THIS for any factual question that needs up-to-date or external knowledge: 'who won...', 'what is...', 'latest news on...', 'how do I...', 'find me a tutorial for...', or any general knowledge question you cannot answer from your training data alone. Returns the top results with titles, URLs, and snippets. Examples: 'who won the F1 race yesterday?' → call web_search(query='F1 race winner yesterday'); 'latest on quantum computing' → call web_search(query='quantum computing 2025'); 'best Python web framework' → call web_search(query='best Python web framework 2025').",
+        description="USE THIS for any factual question needing current or external knowledge (news, 'what is X', 'who won Y', how-tos, latest on Z). Returns top results with titles, URLs, snippets. Example: 'who won the F1 race yesterday?' → web_search(query='F1 race winner yesterday').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "query": types.Schema(
-                    type="STRING",
-                    description="The search query (1-10 words works best)."
-                ),
-                "max_results": types.Schema(
-                    type="INTEGER",
-                    description="How many results to return (1-10). Default: 5."
-                )
+                "query": types.Schema(type="STRING", description="The search query (1-10 words works best)."),
+                "max_results": types.Schema(type="INTEGER", description="How many results to return (1-10). Default: 5.")
             },
             required=["query"]
         )
     ),
     types.FunctionDeclaration(
         name="fetch_url",
-        description="Fetches the readable text content of a specific URL. USE THIS when the user shares a link, wants to read an article, summarize a webpage, or extract information from a specific page. Returns the page text (capped at max_chars, default 8000). The URL must be public (http or https); localhost and private IPs are blocked. Examples: 'summarize https://example.com/article' → call fetch_url(url='https://example.com/article'); 'read this page for me' → call fetch_url(url='...').",
+        description="USE THIS to read or summarize a specific webpage. Returns extracted text (capped at max_chars, default 8000). Localhost and private IPs are blocked. Example: 'summarize https://example.com/article' → fetch_url(url='https://...').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "url": types.Schema(
-                    type="STRING",
-                    description="The URL to fetch. Must start with http:// or https://. Localhost and private IPs are blocked for security."
-                ),
-                "max_chars": types.Schema(
-                    type="INTEGER",
-                    description="Maximum characters to return (100-50000). Default: 8000."
-                )
+                "url": types.Schema(type="STRING", description="URL to fetch. Must start with http:// or https://. Localhost and private IPs are blocked."),
+                "max_chars": types.Schema(type="INTEGER", description="Maximum characters to return. Default: 8000.")
             },
             required=["url"]
         )
@@ -329,86 +281,59 @@ JARVIS_TOOLS = [
     # ----- Productivity -----
     types.FunctionDeclaration(
         name="set_timer",
-        description="Sets a countdown timer. When the time expires, JARVIS plays a beep and announces the timer's label. USE THIS whenever the user asks for a timer, countdown, or 'remind me in N seconds/minutes/hours'. Examples: 'set a 5 minute timer' → call set_timer(seconds=300, label='5 minute timer'); 'remind me in 30 seconds' → call set_timer(seconds=30, label='reminder'); 'timer for 1 hour' → call set_timer(seconds=3600, label='hour timer'). Maximum 24 hours (86400 seconds).",
+        description="USE THIS to set a countdown timer (1s to 24h). When it expires, JARVIS plays a beep and announces the label. Example: 'set a 5-minute timer' → set_timer(seconds=300, label='5-minute timer').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "seconds": types.Schema(
-                    type="INTEGER",
-                    description="How many seconds until the timer fires. Range: 1-86400 (24h)."
-                ),
-                "label": types.Schema(
-                    type="STRING",
-                    description="Name for the timer (e.g. 'pasta', 'workout'). Default: 'timer'."
-                )
+                "seconds": types.Schema(type="INTEGER", description="Seconds until the timer fires. Range: 1-86400."),
+                "label": types.Schema(type="STRING", description="Name for the timer (e.g. 'pasta'). Default: 'timer'.")
             },
             required=["seconds"]
         )
     ),
     types.FunctionDeclaration(
         name="take_note",
-        description="Saves a note to a notes file in the user's Documents folder (~/Documents/JARVIS_Notes.md). USE THIS whenever the user wants to remember something, jot down a thought, or save information for later. Examples: 'remember that I need to call John tomorrow' → call take_note(text='Call John tomorrow'); 'note this: my passport number is 12345' → call take_note(text='Passport number: 12345'); 'save this idea: ...' → call take_note(text='...').",
+        description="USE THIS to remember or jot something down. Appends to ~/Documents/JARVIS_Notes.md. Example: 'remember to call John tomorrow' → take_note(text='Call John tomorrow').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "text": types.Schema(
-                    type="STRING",
-                    description="The note content to save."
-                ),
-                "title": types.Schema(
-                    type="STRING",
-                    description="Optional title for the note. If omitted, a timestamped header is used."
-                )
+                "text": types.Schema(type="STRING", description="The note content."),
+                "title": types.Schema(type="STRING", description="Optional title. If omitted, a timestamped header is used.")
             },
             required=["text"]
         )
     ),
     types.FunctionDeclaration(
         name="calculate",
-        description="Evaluates a math expression and returns the numeric result. Supports +, -, *, /, // (integer divide), % (modulo), ** or ^ (power), parentheses, and these math functions: sqrt, sin, cos, tan, asin, acos, atan, atan2, log, log10, log2, exp, ceil, floor, fabs, factorial, gcd, pow, radians, degrees, cosh, sinh, tanh. Also accepts constants pi, e, tau. Examples: '2+2' → call calculate(expression='2+2'); 'sqrt(144)' → call calculate(expression='sqrt(144)'); '2^10' → call calculate(expression='2^10'); 'sin(pi/2)' → call calculate(expression='sin(pi/2)').",
+        description="USE THIS to evaluate math. Supports +, -, *, /, //, %, **, ^, parens, math funcs (sqrt, sin, cos, tan, log, exp, etc.) and constants (pi, e, tau). Example: 'sqrt(144)' → calculate(expression='sqrt(144)').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "expression": types.Schema(
-                    type="STRING",
-                    description="Math expression like '2+2*3', 'sqrt(144)', '2^10', 'sin(pi/2)'."
-                )
+                "expression": types.Schema(type="STRING", description="Math expression like '2+2*3', 'sqrt(144)', '2^10'.")
             },
             required=["expression"]
         )
     ),
     types.FunctionDeclaration(
         name="get_definition",
-        description="Looks up the English definition of a word. USE THIS whenever the user asks 'what does X mean?', 'define X', or 'definition of X'. Returns definitions, parts of speech, and example sentences. Examples: 'what does serendipity mean?' → call get_definition(word='serendipity'); 'define ephemeral' → call get_definition(word='ephemeral').",
+        description="USE THIS for 'what does X mean?' or 'define X'. Returns definitions, parts of speech, and example sentences. Example: 'define serendipity' → get_definition(word='serendipity').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "word": types.Schema(
-                    type="STRING",
-                    description="The English word to look up."
-                )
+                "word": types.Schema(type="STRING", description="The English word to look up.")
             },
             required=["word"]
         )
     ),
     types.FunctionDeclaration(
         name="translate",
-        description="Translates text into another language. USE THIS for any translation request: 'translate X to Spanish', 'how do you say X in French', 'what's X in Japanese'. Returns the translated text. Examples: 'translate hello to Spanish' → call translate(text='hello', target_lang='es'); 'how do you say good morning in Japanese?' → call translate(text='good morning', target_lang='ja'). Common codes: es=Spanish, fr=French, de=German, it=Italian, pt=Portuguese, ja=Japanese, ko=Korean, zh=Chinese, ar=Arabic, ru=Russian, hi=Hindi, en=English.",
+        description="USE THIS to translate text. Codes: es, fr, de, it, pt, ja, ko, zh, ar, ru, hi, en. Example: 'translate hello to Spanish' → translate(text='hello', target_lang='es').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "text": types.Schema(
-                    type="STRING",
-                    description="The text to translate (up to ~500 chars)."
-                ),
-                "target_lang": types.Schema(
-                    type="STRING",
-                    description="Target language code: 'es', 'fr', 'de', 'it', 'pt', 'ja', 'ko', 'zh', 'ar', 'ru', 'hi', 'en', etc."
-                ),
-                "source_lang": types.Schema(
-                    type="STRING",
-                    description="Source language code. Default: 'en'. Set to 'auto' for auto-detect."
-                )
+                "text": types.Schema(type="STRING", description="Text to translate (up to ~500 chars)."),
+                "target_lang": types.Schema(type="STRING", description="Target language code (es, fr, de, ja, zh, etc.)."),
+                "source_lang": types.Schema(type="STRING", description="Source language code. Default: 'en'. Use 'auto' to detect.")
             },
             required=["text", "target_lang"]
         )
@@ -417,36 +342,27 @@ JARVIS_TOOLS = [
     # ----- System -----
     types.FunctionDeclaration(
         name="list_processes",
-        description="Lists currently running processes (apps + background tasks) on the user's PC. USE THIS for 'what's running', 'which apps are open', 'is X running', 'what's using my CPU/memory', or to find a process to close. Returns a list with PID, name, CPU%, and memory. Examples: 'what's eating my CPU?' → call list_processes(); 'is Chrome running?' → call list_processes(name_filter='chrome'); 'show all Python processes' → call list_processes(name_filter='python').",
+        description="USE THIS to see what's running on the PC (PID, name, CPU%, memory%). Filter with name_filter. Example: 'is Chrome running?' → list_processes(name_filter='chrome').",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "name_filter": types.Schema(
-                    type="STRING",
-                    description="Optional substring to filter process names (case-insensitive). E.g. 'chrome', 'python', 'discord'."
-                ),
-                "limit": types.Schema(
-                    type="INTEGER",
-                    description="Maximum processes to return. Default: 30."
-                )
+                "name_filter": types.Schema(type="STRING", description="Substring to filter process names (case-insensitive). E.g. 'chrome'."),
+                "limit": types.Schema(type="INTEGER", description="Max processes to return. Default: 30.")
             }
         )
     ),
     types.FunctionDeclaration(
         name="get_active_window",
-        description="Returns the title of the currently focused (active) window. USE THIS for 'what window is active', 'what am I looking at', or 'which app is in focus'. Windows-only.",
+        description="USE THIS for 'what window is active' or 'which app is in focus'. Returns the focused window's title. Windows-only.",
         parameters=types.Schema(type="OBJECT", properties={})
     ),
     types.FunctionDeclaration(
         name="focus_window",
-        description="Brings a window to the front and focuses it, matched by a substring of its title. USE THIS for 'switch to X', 'focus on X', 'bring X to front', 'go back to X'. Examples: 'switch to Chrome' → call focus_window(title='Chrome'); 'go back to VS Code' → call focus_window(title='Visual Studio Code'); 'focus Discord' → call focus_window(title='Discord'). Windows-only.",
+        description="USE THIS to switch to or focus a window by title substring. Example: 'switch to Chrome' → focus_window(title='Chrome'). Windows-only.",
         parameters=types.Schema(
             type="OBJECT",
             properties={
-                "title": types.Schema(
-                    type="STRING",
-                    description="Substring of the window title to match (case-insensitive). E.g. 'Chrome', 'Notepad', 'Discord'."
-                )
+                "title": types.Schema(type="STRING", description="Substring of the window title (case-insensitive). E.g. 'Chrome'.")
             },
             required=["title"]
         )
@@ -1537,7 +1453,9 @@ class JarvisCore:
         if self._api_key:
             self.client = genai.Client(api_key=self._api_key)
 
-        self.watchdog = ResponseWatchdog(30.0, self._on_watchdog_timeout)
+        # 45s gives the model breathing room to pick a tool from a large
+        # toolset, but still aborts quickly if the link is truly dead.
+        self.watchdog = ResponseWatchdog(45.0, self._on_watchdog_timeout)
 
         self.thread.start()
 
