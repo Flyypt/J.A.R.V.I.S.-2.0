@@ -11,6 +11,8 @@ import struct
 import ctypes
 import platform
 import subprocess
+import shutil
+import traceback
 from pathlib import Path
 from typing import List, Optional, Callable
 
@@ -453,6 +455,7 @@ UI_HTML = """
         let bridge = null;
         let activeJarvisMsg = null;
         let jarvisBuffer = "";
+        let jarvisStreamTimer = null;
         let micOn = false;
         let cmdHistory = [];
         let cmdIndex = -1;
@@ -495,20 +498,21 @@ UI_HTML = """
         function updateStats(cpu, mem, disk, netIn, netOut, win) {
     const cpuBar = document.getElementById('cpu-bar');
     const cpuTxt = document.getElementById('cpu-txt');
-    if (cpuBar) cpuBar.style.width = Math.min(100, cpu || 0) + '%';
-    if (cpuTxt) cpuTxt.innerText = (cpu === undefined || cpu === null ? '--' : cpu) + '%';
+    const safeCpu = Math.min(100, Math.max(0, Number(cpu) || 0));
+    if (cpuBar) cpuBar.style.width = safeCpu + '%';
+    if (cpuTxt) cpuTxt.innerText = safeCpu.toFixed(1) + '%';
 
     const memBar = document.getElementById('mem-bar');
     const memTxt = document.getElementById('mem-txt');
-    let memPct = Math.min(100, Math.round((mem || 0) / 100000 * 100));
+    let memPct = Math.min(100, Math.max(0, Number(mem) || 0));
     if (memBar) memBar.style.width = memPct + '%';
-    if (memTxt) memTxt.innerText = formatTokens(mem || 0) + ' tokens';
+    if (memTxt) memTxt.innerText = memPct.toFixed(1) + '%';
 
     const diskBar = document.getElementById('disk-bar');
     const diskTxt = document.getElementById('disk-txt');
-    let diskPct = Math.min(100, Math.round((disk || 0) / 200000 * 100));
+    let diskPct = Math.min(100, Math.max(0, Number(disk) || 0));
     if (diskBar) diskBar.style.width = diskPct + '%';
-    if (diskTxt) diskTxt.innerText = formatBytes(disk || 0);
+    if (diskTxt) diskTxt.innerText = diskPct.toFixed(1) + '%';
 
     const nIn = document.getElementById('net-in');
     const nOut = document.getElementById('net-out');
@@ -516,6 +520,16 @@ UI_HTML = """
     if (nIn) nIn.innerText = netIn || '0.0 B/s';
     if (nOut) nOut.innerText = netOut || '0.0 B/s';
     if (fWin) fWin.innerText = win || 'System Idle';
+
+    // "Live" heartbeat — confirms the telemetry tick is actually reaching the UI.
+    const teleLive = document.getElementById('tele-live');
+    if (teleLive) {
+        const d = new Date();
+        const hh = String(d.getHours()).padStart(2, '0');
+        const mm = String(d.getMinutes()).padStart(2, '0');
+        const ss = String(d.getSeconds()).padStart(2, '0');
+        teleLive.innerText = '// LIVE \u2022 ' + hh + ':' + mm + ':' + ss;
+    }
 }
 
 function initBridge() {
@@ -544,6 +558,191 @@ function initBridge() {
         document.addEventListener('DOMContentLoaded', function() {
             initBridge();
         });
+
+        // ============================================
+        // BRIDGE HANDLERS (called from Python via QWebChannel)
+        // ============================================
+        function createMsg(cls, sender, text, streaming) {
+            const log = document.getElementById('log-area');
+            if (!log) return null;
+            const div = document.createElement('div');
+            div.className = 'msg ' + cls + (streaming ? ' streaming' : '');
+            const t = new Date().toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+            div.innerHTML =
+                '<div class="msg-header">' +
+                    '<span class="msg-sender">' + esc(sender) + '</span>' +
+                    '<span class="msg-time">' + t + '</span>' +
+                '</div>' +
+                '<div class="msg-body"></div>';
+            const body = div.querySelector('.msg-body');
+            if (sender === 'ACTION') {
+                body.textContent = text;
+            } else {
+                body.innerHTML = md(text);
+                body.querySelectorAll('pre code').forEach(b => {
+                    if (typeof hljs !== 'undefined') hljs.highlightElement(b);
+                    addCopyBtn(b);
+                });
+            }
+            log.appendChild(div);
+            if (!userScrolled) log.scrollTop = log.scrollHeight;
+            return div;
+        }
+
+        function finalizeJarvis() {
+            if (activeJarvisMsg) {
+                activeJarvisMsg.classList.remove('streaming');
+                activeJarvisMsg = null;
+            }
+            jarvisBuffer = '';
+            if (jarvisStreamTimer) { clearTimeout(jarvisStreamTimer); jarvisStreamTimer = null; }
+        }
+
+        function appendLog(sender, text, isJarvis) {
+            if (isJarvis) {
+                jarvisBuffer += text;
+                if (!activeJarvisMsg) {
+                    activeJarvisMsg = createMsg('msg-jarvis', 'JARVIS', jarvisBuffer, true);
+                } else {
+                    const body = activeJarvisMsg.querySelector('.msg-body');
+                    body.innerHTML = md(jarvisBuffer);
+                    body.querySelectorAll('pre code').forEach(b => {
+                        if (typeof hljs !== 'undefined') hljs.highlightElement(b);
+                        addCopyBtn(b);
+                    });
+                    const log = document.getElementById('log-area');
+                    if (log && !userScrolled) log.scrollTop = log.scrollHeight;
+                }
+                if (jarvisStreamTimer) clearTimeout(jarvisStreamTimer);
+                jarvisStreamTimer = setTimeout(finalizeJarvis, 1500);
+            } else {
+                finalizeJarvis();
+                const cls = sender === 'YOU' ? 'msg-user'
+                          : sender === 'SYSTEM' ? 'msg-system'
+                          : sender === 'ACTION' ? 'msg-action'
+                          : 'msg-jarvis';
+                createMsg(cls, sender, text, false);
+            }
+        }
+
+        function setStatus(s) {
+            const label = document.getElementById('header-label');
+            const banner = document.getElementById('center-status');
+            const dot = document.getElementById('header-dot');
+            if (label) label.innerText = s;
+            if (banner) {
+                banner.innerText = 'CORE STATUS: ' + s;
+                banner.className = 'status-banner ' + s.toLowerCase();
+            }
+            if (dot) {
+                const colors = {OFFLINE: '#ff4d4d', THINKING: '#ffb703', SPEAKING: '#00a8ff', LISTENING: '#00f5d4'};
+                dot.style.background = colors[s] || 'var(--jarvis-cyan)';
+            }
+        }
+
+        function updateModelBadge(model, fallback) {
+            const sel = document.getElementById('model-select');
+            const badge = document.getElementById('model-badge');
+            if (sel && [...sel.options].some(o => o.value === model)) sel.value = model;
+            if (badge) {
+                if (fallback) {
+                    badge.innerText = 'FALLBACK';
+                    badge.style.display = 'inline-block';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        }
+
+        function showToast(message, type) {
+            const c = document.getElementById('toast-container');
+            if (!c) return;
+            const t = document.createElement('div');
+            t.className = 'toast ' + (type || '');
+            t.innerText = message;
+            c.appendChild(t);
+            requestAnimationFrame(() => t.classList.add('show'));
+            setTimeout(() => {
+                t.classList.remove('show');
+                setTimeout(() => t.remove(), 400);
+            }, 3500);
+        }
+
+        // ============================================
+        // AUDIO VISUALIZER
+        // ============================================
+        let _audioLevel = 0;
+        let _audioDecay = 0;
+        function updateAudioLevel(l) { _audioLevel = Math.max(0, Math.min(1, l || 0)); }
+        function drawAudioViz() {
+            const cv = document.getElementById('audio-viz');
+            if (cv) {
+                const ctx = cv.getContext('2d');
+                const w = cv.width, h = cv.height;
+                ctx.clearRect(0, 0, w, h);
+                _audioDecay = Math.max(_audioLevel, _audioDecay * 0.85);
+                const bars = 32, gap = 2;
+                const bw = (w - gap * (bars - 1)) / bars;
+                const cy = h / 2;
+                for (let i = 0; i < bars; i++) {
+                    const wave = Math.sin(Date.now() / 200 + i * 0.4) * 0.3 + 0.7;
+                    const amp = Math.max(0.05, _audioDecay * wave);
+                    const bh = amp * h;
+                    const x = i * (bw + gap);
+                    const g = ctx.createLinearGradient(0, cy - bh/2, 0, cy + bh/2);
+                    g.addColorStop(0, 'rgba(0, 212, 255, 0.0)');
+                    g.addColorStop(0.5, 'rgba(0, 212, 255, 0.7)');
+                    g.addColorStop(1, 'rgba(0, 212, 255, 0.0)');
+                    ctx.fillStyle = g;
+                    ctx.fillRect(x, cy - bh/2, bw, bh);
+                }
+            }
+            requestAnimationFrame(drawAudioViz);
+        }
+        requestAnimationFrame(drawAudioViz);
+
+        // ============================================
+        // UI EVENT HANDLERS
+        // ============================================
+        function sendCmd() {
+            const input = document.getElementById('cmd-input');
+            if (!input || !bridge) return;
+            const text = input.value.trim();
+            if (!text) return;
+            cmdHistory.push(text);
+            if (cmdHistory.length > 50) cmdHistory.shift();
+            cmdIndex = cmdHistory.length;
+            bridge.submitCommand(text);
+            input.value = '';
+        }
+
+        function changeModel(v) { if (bridge) bridge.changeModel(v); }
+
+        function toggleVoice(checked) {
+            if (bridge) bridge.setVoiceModeEnabled(String(checked));
+            const mic = document.getElementById('mic-btn');
+            if (mic) mic.disabled = !checked;
+            if (!checked && micOn) toggleMic();
+        }
+
+        function toggleMic() {
+            micOn = !micOn;
+            const btn = document.getElementById('mic-btn');
+            if (btn) {
+                btn.classList.toggle('mic-active', micOn);
+                btn.classList.toggle('mic-btn-inactive', !micOn);
+            }
+            if (bridge) bridge.setMicActive(micOn);
+        }
+
+        function reconnectCore() { if (bridge) bridge.triggerReconnect(); }
+        function resetCore() { if (bridge) bridge.resetSession(); }
+
+        function clearLog() {
+            finalizeJarvis();
+            const log = document.getElementById('log-area');
+            if (log) log.innerHTML = '';
+        }
     </script>
 </head>
 <body>
@@ -565,7 +764,7 @@ function initBridge() {
     </header>
     <main>
         <div class="hud-panel" id="left-panel">
-            <div class="panel-label">SYSTEM TELEMETRY <span>// LIVE</span></div>
+            <div class="panel-label">SYSTEM TELEMETRY <span id="tele-live">// LIVE</span></div>
             <div class="metric">
                 <div class="metric-header"><span class="metric-name">Neural Load</span><span class="metric-val" id="cpu-txt">--%</span></div>
                 <div class="bar-track"><div class="bar-fill" id="cpu-bar" style="width:0%"></div></div>
@@ -812,7 +1011,7 @@ def get_active_window_title():
 
 
 class TelemetryWorker(QThread):
-    stats_updated = pyqtSignal(int, int, int, str, str, str)
+    stats_updated = pyqtSignal(float, float, float, str, str, str)
 
     def __init__(self):
         super().__init__()
@@ -820,18 +1019,28 @@ class TelemetryWorker(QThread):
         self.last_time = time.time()
 
     def run(self):
+        # Prime psutil.cpu_percent — its first call returns 0.0 because it has
+        # no baseline. Establishing the baseline here keeps the first real
+        # value the UI sees accurate.
+        try:
+            psutil.cpu_percent(interval=None)
+        except Exception:
+            pass
+
         while not self.isInterruptionRequested():
             try:
-                cpu = int(psutil.cpu_percent(interval=None))
-                mem = int(psutil.virtual_memory().percent)
-                disk = self._get_disk_pct()
+                cpu = float(psutil.cpu_percent(interval=None))
+                mem = float(psutil.virtual_memory().percent)
+                disk = float(self._get_disk_pct())
                 now = time.time()
                 dt = now - self.last_time
                 net_in, net_out = self._get_net(dt)
                 self.last_time = now
                 self.stats_updated.emit(cpu, mem, disk, net_in, net_out, get_active_window_title())
-            except Exception:
-                pass
+            except Exception as e:
+                # Surface errors to stderr so silent worker death is debuggable.
+                # (We keep going — telemetry is best-effort.)
+                print(f"[Telemetry] tick error: {e}")
             self.msleep(TELEMETRY_INTERVAL_MS)
 
     def _get_disk_pct(self):
@@ -874,7 +1083,7 @@ class TelemetryWorker(QThread):
 class PyBridge(QObject):
     logReceived = pyqtSignal(str, str)
     statusUpdated = pyqtSignal(str)
-    telemetryUpdated = pyqtSignal(int, int, int, str, str, str)
+    telemetryUpdated = pyqtSignal(float, float, float, str, str, str)
     modelSwitched = pyqtSignal(str, bool)
     audioLevelUpdated = pyqtSignal(float)
     toastReceived = pyqtSignal(str, str)
@@ -925,26 +1134,39 @@ class PyBridge(QObject):
 # CORE INTELLIGENCE
 # ==========================================
 class ResponseWatchdog:
+    """One-shot timeout watchdog. Thread-safe to start/stop from any thread.
+
+    Uses threading.Timer (not asyncio) because start()/stop() are called from
+    the Qt main thread (via pyqtSlot dispatch_text), and there's no asyncio
+    loop running there. threading.Timer works from any thread.
+    """
     def __init__(self, timeout: float, callback: Callable):
         self.timeout = timeout
         self.callback = callback
-        self._task: Optional[asyncio.Task] = None
+        self._timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
 
     def start(self):
         self.stop()
-        self._task = asyncio.create_task(self._run())
+        with self._lock:
+            # daemon=True so the timer thread doesn't block process exit
+            self._timer = threading.Timer(self.timeout, self._fire)
+            self._timer.daemon = True
+            self._timer.start()
 
     def stop(self):
-        if self._task:
-            self._task.cancel()
-            self._task = None
+        with self._lock:
+            if self._timer:
+                self._timer.cancel()
+                self._timer = None
 
-    async def _run(self):
+    def _fire(self):
+        with self._lock:
+            self._timer = None
         try:
-            await asyncio.sleep(self.timeout)
             self.callback()
-        except asyncio.CancelledError:
-            pass
+        except Exception as e:
+            print(f"[Watchdog] callback error: {e}")
 
 
 class JarvisCore:
@@ -959,6 +1181,8 @@ class JarvisCore:
         self._shutdown = False
         self._state = "INIT"
         self._state_lock = threading.Lock()
+        self._pending_lock = threading.Lock()
+        self._history_lock = threading.Lock()
 
         self.voice_enabled = False
         self.mic_active = False
@@ -1024,6 +1248,20 @@ class JarvisCore:
             self._emit_log("SYSTEM", "Neural response timeout. Link may be congested or model is unresponsive.")
             self.set_state("READY")
 
+    def _schedule(self, coro, desc: str = "task"):
+        """Thread-safe wrapper around run_coroutine_threadsafe that survives
+        a closed/stopped event loop (e.g. during shutdown)."""
+        try:
+            return asyncio.run_coroutine_threadsafe(coro, self.loop)
+        except RuntimeError as e:
+            # Loop is closed or stopping — not an error during shutdown.
+            if not self._shutdown:
+                self._emit_log("SYSTEM", f"{desc} dropped (loop unavailable): {e}")
+            return None
+        except Exception as e:
+            self._emit_log("SYSTEM", f"{desc} schedule error: {e}")
+            return None
+
     def _load_api_key(self):
         if API_CONFIG_PATH.exists():
             try:
@@ -1041,14 +1279,15 @@ class JarvisCore:
         )
 
     def _add_history(self, role: str, text: str):
-        self.history.append(types.Content(parts=[types.Part.from_text(text=text)], role=role))
-        self.context_chars += len(text)
-        self.context_tokens += max(1, len(text) // 4)
-        while len(self.history) > MAX_HISTORY:
-            removed = self.history.pop(0)
-            txt = ''.join(p.text for p in removed.parts if hasattr(p, 'text') and p.text)
-            self.context_chars -= len(txt)
-            self.context_tokens -= max(1, len(txt) // 4)
+        with self._history_lock:
+            self.history.append(types.Content(parts=[types.Part.from_text(text=text)], role=role))
+            self.context_chars += len(text)
+            self.context_tokens += max(1, len(text) // 4)
+            while len(self.history) > MAX_HISTORY:
+                removed = self.history.pop(0)
+                txt = ''.join(p.text for p in removed.parts if hasattr(p, 'text') and p.text)
+                self.context_chars -= len(txt)
+                self.context_tokens -= max(1, len(txt) // 4)
 
     def _extract_text(self, response) -> str:
         """Extract visible text from every possible SDK location."""
@@ -1089,7 +1328,10 @@ class JarvisCore:
             self._response_buffer = ""
 
         if not self.session_ready.is_set() or not self.session:
-            self.pending_messages.append(text)
+            with self._pending_lock:
+                if len(self.pending_messages) >= MAX_PENDING:
+                    self.pending_messages.pop(0)  # drop oldest
+                self.pending_messages.append(text)
             self._emit_log("SYSTEM", "Connection unstable. Command buffered for re-link.")
             return
 
@@ -1098,7 +1340,7 @@ class JarvisCore:
             turns=[types.Content(parts=[types.Part.from_text(text=text)], role='user')],
             turn_complete=True
         )
-        asyncio.run_coroutine_threadsafe(self._safe_send(coro, "Message transmit"), self.loop)
+        self._schedule(self._safe_send(coro, "Message transmit"), "Message transmit")
         self.set_state("THINKING")
         self.watchdog.start()
 
@@ -1115,7 +1357,7 @@ class JarvisCore:
             coro = self.session.send_realtime_input(
                 media=types.Blob(mime_type="audio/pcm;rate=16000", data=data)
             )
-            asyncio.run_coroutine_threadsafe(self._safe_send(coro, "Audio transmit"), self.loop)
+            self._schedule(coro, "Audio transmit")
 
     def set_voice_mode(self, enabled: bool):
         self.voice_enabled = enabled
@@ -1151,7 +1393,7 @@ class JarvisCore:
 
     def trigger_reconnect(self):
         if self.session and self.loop:
-            asyncio.run_coroutine_threadsafe(self._safe_close(), self.loop)
+            self._schedule(self._safe_close(), "Reconnect")
 
     async def _safe_close(self):
         if self.session:
@@ -1163,8 +1405,10 @@ class JarvisCore:
             self.session_ready.clear()
 
     def reset_session(self):
-        self.history.clear()
-        self.pending_messages.clear()
+        with self._history_lock:
+            self.history.clear()
+        with self._pending_lock:
+            self.pending_messages.clear()
         with self._response_lock:
             self._response_buffer = ""
         self.context_tokens = 0
@@ -1183,7 +1427,7 @@ class JarvisCore:
         if self.audio_recorder:
             self.audio_recorder.stop()
         if self.session:
-            asyncio.run_coroutine_threadsafe(self._safe_close(), self.loop)
+            self._schedule(self._safe_close(), "Shutdown close")
         self.loop.call_soon_threadsafe(self.loop.stop)
 
     async def _connect_pipeline(self):
@@ -1217,13 +1461,18 @@ class JarvisCore:
                     self.session_ready.set()
 
                     # Context restoration (only on reconnect with token, otherwise start fresh)
-                    if self.history and self.resumption_token:
-                        try:
-                            ctx = self.history[-MAX_HISTORY:]
-                            await session.send_client_content(turns=ctx, turn_complete=False)
-                            self._emit_log("SYSTEM", f"Context restored: {len(ctx)} turns.")
-                        except Exception as e:
-                            self._emit_log("SYSTEM", f"Context restore warning: {str(e)[:80]}")
+                    if self.resumption_token:
+                        with self._history_lock:
+                            if self.history:
+                                ctx = list(self.history[-MAX_HISTORY:])  # snapshot
+                            else:
+                                ctx = []
+                        if ctx:
+                            try:
+                                await session.send_client_content(turns=ctx, turn_complete=False)
+                                self._emit_log("SYSTEM", f"Context restored: {len(ctx)} turns.")
+                            except Exception as e:
+                                self._emit_log("SYSTEM", f"Context restore warning: {str(e)[:80]}")
 
                     self._flush_pending()
                     self.reconnect_backoff = 1.0
@@ -1292,18 +1541,22 @@ class JarvisCore:
     def _flush_pending(self):
         if not self.session or not self.session_ready.is_set():
             return
-        while self.pending_messages:
-            msg = self.pending_messages.pop(0)
+        while True:
+            with self._pending_lock:
+                if not self.pending_messages:
+                    return
+                msg = self.pending_messages.pop(0)
             self._add_history("user", msg)
             coro = self.session.send_client_content(
                 turns=[types.Content(parts=[types.Part.from_text(text=msg)], role='user')],
                 turn_complete=True
             )
-            try:
-                asyncio.run_coroutine_threadsafe(self._safe_send(coro, "Flush transmit"), self.loop)
-            except Exception:
-                self.pending_messages.insert(0, msg)
-                break
+            future = self._schedule(self._safe_send(coro, "Flush transmit"), "Flush transmit")
+            if future is None:
+                # Loop unavailable — put the message back at the head.
+                with self._pending_lock:
+                    self.pending_messages.insert(0, msg)
+                return
 
     async def _handle_response(self, response):
         try:
@@ -1361,7 +1614,6 @@ class JarvisCore:
                     self.watchdog.stop()
 
         except Exception as e:
-            import traceback
             self._emit_log("SYSTEM", f"Response processing error: {e}")
             traceback.print_exc()
             self.watchdog.stop()
@@ -1415,11 +1667,20 @@ class JarvisCore:
                 self._emit_log("SYSTEM", f"Tool response transmission failed: {e}")
 
     def _tool_open_app(self, command: str):
-        if os.name == 'nt':
-            os.startfile(command)
-        else:
-            os.system(f"{command} &")
-        return f"Launched {command}"
+        try:
+            if os.name == 'nt':
+                # os.startfile handles URLs and file paths but NOT bare exe names
+                # on PATH. Resolve first so "notepad.exe" works.
+                resolved = shutil.which(command)
+                os.startfile(resolved if resolved else command)
+            else:
+                # subprocess.Popen resolves PATH and avoids shell `&` quirks
+                # (Android/Termux sh, busybox, etc.).
+                target = shutil.which(command) or command
+                subprocess.Popen([target])
+            return f"Launched {command}"
+        except Exception as e:
+            return f"Launch failed: {e}"
 
     def _tool_screenshot(self):
         path = BASE_DIR / "screenshot.jpg"
@@ -1429,9 +1690,9 @@ class JarvisCore:
         img.save(buf, format="JPEG", quality=85)
         data = buf.getvalue()
         if self.session and self.session_ready.is_set():
-            asyncio.run_coroutine_threadsafe(
+            self._schedule(
                 self.session.send_realtime_input(media=types.Blob(mime_type="image/jpeg", data=data)),
-                self.loop
+                "Screenshot upload"
             )
         return "Screenshot captured and transmitted."
 
@@ -1494,10 +1755,8 @@ class JarvisMainWindow(QMainWindow):
 
     def _update_stats(self, cpu, mem_pct, disk_pct, net_in, net_out, win_title):
         if self.ui_ready and self.core:
-            ai_tok = self.core.context_tokens
-            ai_char = self.core.context_chars
             esc = win_title.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
-            self.bridge.telemetryUpdated.emit(cpu, ai_tok, ai_char, net_in, net_out, esc)
+            self.bridge.telemetryUpdated.emit(cpu, mem_pct, disk_pct, net_in, net_out, esc)
 
     def set_mic_active(self, active):
         if self.core:
