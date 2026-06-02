@@ -13,8 +13,22 @@ import platform
 import subprocess
 import shutil
 import traceback
+import urllib.request
+import urllib.parse
+import urllib.error
+import re
+import html
+import html.parser
+import ipaddress
+import socket
+import ast
+import datetime
 from pathlib import Path
-from typing import List, Optional, Callable
+from typing import List, Optional, Callable, Dict, Any
+try:
+    import winsound  # Windows-only; used by set_timer for the alarm beep
+except ImportError:
+    winsound = None
 
 import pyautogui
 import psutil
@@ -55,7 +69,16 @@ Address the user as "Sir" or "Madam" unless instructed otherwise.
 Maintain full conversational memory; build upon prior context naturally.
 Do not repeat greetings if the conversation is already underway.
 Provide concise, high-signal responses. Accuracy and operational efficiency are paramount.
-When using tools, confirm actions briefly and report outcomes.
+
+CRITICAL — Tool usage rules (do not violate):
+- When a user request matches an available tool, emit the function call in the SAME turn, IMMEDIATELY. Do not narrate, explain, or announce the decision first.
+- NEVER say things like "I have determined that...", "I will use the X tool", "I am ready to proceed", "The critical X parameter is set to Y", or "Let me fetch the data". That is internal reasoning — keep it private.
+- After a tool returns its result, give the user a brief, natural reply based on the data. Do not recap the tool call or restate the parameters.
+- If a tool fails, retry up to once, then tell the user the failure in plain language.
+
+CRITICAL — Internal reasoning stays internal:
+- Do not verbalize your step-by-step thinking, intent analysis, parameter selection, or planning. The user sees only your final spoken text.
+- Never begin a turn with phrases like "I've determined", "I need to", "I will", "Let me", "Based on the user's request". Speak as if your reply is the first thing they hear.
 
 Current Time: {time} | Date: {date}
 """
@@ -122,6 +145,310 @@ JARVIS_TOOLS = [
             type="OBJECT",
             properties={"key": types.Schema(type="STRING", description="Key or combo to press.")},
             required=["key"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="get_weather",
+        description="Fetches current weather conditions for a location. CALL THIS FUNCTION IMMEDIATELY AND SILENTLY whenever the user asks about weather, temperature, rain, snow, forecasts, humidity, wind, or any outdoor conditions. Do not guess, do not refuse, do not explain your decision to the user — just call this function in the same turn. Pass a city name (e.g. 'London', 'Tokyo', 'New York', 'Paris', 'San Francisco') for that specific location, or pass 'auto' (or empty string) to detect the user's current location via IP geolocation. Examples: user says 'weather in Paris?' → call get_weather(location='Paris'); user says 'is it raining?' → call get_weather(location='auto').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "location": types.Schema(
+                    type="STRING",
+                    description="City name to look up, or 'auto' (or empty string) to detect the user's current location. Examples: 'Tokyo', 'London', 'auto'."
+                )
+            }
+        )
+    ),
+
+    # ----- Filesystem (browse the user's PC) -----
+    types.FunctionDeclaration(
+        name="list_directory",
+        description="Lists files and folders inside a directory on the user's PC. USE THIS whenever the user wants to see what's in a folder, browse a directory, or check what files exist. Returns a formatted listing with names, types ([DIR]/[FILE]), and sizes. Examples: 'what's in my Documents?' → call list_directory(path='~/Documents'); 'show my Desktop' → call list_directory(path='~/Desktop'); 'list my Downloads' → call list_directory(path='~/Downloads'). If no path is given, the user's home folder is used.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(
+                    type="STRING",
+                    description="Directory to list. Supports ~ for the user's home directory. Defaults to home if omitted."
+                )
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="read_file",
+        description="Reads the text content of a file. USE THIS whenever the user wants to open, view, or read a file (text-based). Returns the file content (capped at 50KB; binary files return an error). Use list_directory or search_files first to find the file. Examples: 'read my todo.txt' → call read_file(path='~/todo.txt'); 'show me notes.md' → call read_file(path='~/notes.md'); 'what's in config.yaml?' → call read_file(path='~/config.yaml').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(
+                    type="STRING",
+                    description="Absolute path to the file. Supports ~ for the user's home directory."
+                )
+            },
+            required=["path"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="search_files",
+        description="Finds files by name pattern (glob) on the user's PC. USE THIS whenever the user wants to locate a file by name. Returns matching file paths. Examples: 'find all my Python files' → call search_files(pattern='*.py', directory='~'); 'locate my resume' → call search_files(pattern='*resume*', directory='~'); 'find PDFs in Documents' → call search_files(pattern='*.pdf', directory='~/Documents').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "pattern": types.Schema(
+                    type="STRING",
+                    description="Glob pattern to match file names. Examples: '*.py', '*.txt', '*report*', 'README*'."
+                ),
+                "directory": types.Schema(
+                    type="STRING",
+                    description="Where to search. Defaults to the user's home directory. Supports ~ for home."
+                ),
+                "recursive": types.Schema(
+                    type="BOOLEAN",
+                    description="If true, search subdirectories too. Default: false."
+                )
+            },
+            required=["pattern"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="search_file_contents",
+        description="Searches INSIDE files for a text or regex pattern. USE THIS whenever the user wants to find content within files (e.g. 'where did I write X', 'find the API key in my code'). Returns matches as 'file:line: content'. Examples: 'find where I used TODO' → call search_file_contents(query='TODO', directory='~/projects', recursive=true); 'look for the password in my config' → call search_file_contents(query='password', directory='~', recursive=true).",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "query": types.Schema(
+                    type="STRING",
+                    description="Regex pattern to search for inside files."
+                ),
+                "directory": types.Schema(
+                    type="STRING",
+                    description="Where to search. Defaults to the user's home directory."
+                ),
+                "file_glob": types.Schema(
+                    type="STRING",
+                    description="Only search files matching this glob (e.g. '*.py'). Optional."
+                ),
+                "recursive": types.Schema(
+                    type="BOOLEAN",
+                    description="If true, search subdirectories. Default: true."
+                )
+            },
+            required=["query"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="write_file",
+        description="Creates or overwrites a text file with the given content. USE THIS whenever the user asks to create a file, save text to a file, write a file, or update a file's contents. Auto-creates parent directories if they don't exist. Examples: 'create todo.txt with my list' → call write_file(path='~/todo.txt', content='...'); 'save this to notes.md' → call write_file(path='~/notes.md', content='...'); 'write a Python hello world' → call write_file(path='~/hello.py', content='print(\"hello\")').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(
+                    type="STRING",
+                    description="Where to write. Supports ~ for the user's home directory. Parent directories are created automatically."
+                ),
+                "content": types.Schema(
+                    type="STRING",
+                    description="The full text content to write to the file."
+                )
+            },
+            required=["path", "content"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="move_file",
+        description="Moves or renames a file or folder. USE THIS for 'move X to Y', 'rename X to Y', 'put X in folder Y'. Examples: 'rename old.txt to new.txt' → call move_file(source='~/old.txt', destination='~/new.txt'); 'move report.pdf to Documents' → call move_file(source='~/report.pdf', destination='~/Documents/report.pdf').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "source": types.Schema(
+                    type="STRING",
+                    description="Current path of the file or folder."
+                ),
+                "destination": types.Schema(
+                    type="STRING",
+                    description="New path (the destination)."
+                )
+            },
+            required=["source", "destination"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="create_directory",
+        description="Creates a new folder (and any missing parent folders). USE THIS whenever the user asks to make a new folder, create a directory, or set up a project folder. Example: 'make a folder called Projects on my Desktop' → call create_directory(path='~/Desktop/Projects').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(
+                    type="STRING",
+                    description="Path of the directory to create. Supports ~ for the user's home directory."
+                )
+            },
+            required=["path"]
+        )
+    ),
+
+    # ----- Internet (general knowledge, articles, docs) -----
+    types.FunctionDeclaration(
+        name="web_search",
+        description="Searches the public web for information. USE THIS for any factual question that needs up-to-date or external knowledge: 'who won...', 'what is...', 'latest news on...', 'how do I...', 'find me a tutorial for...', or any general knowledge question you cannot answer from your training data alone. Returns the top results with titles, URLs, and snippets. Examples: 'who won the F1 race yesterday?' → call web_search(query='F1 race winner yesterday'); 'latest on quantum computing' → call web_search(query='quantum computing 2025'); 'best Python web framework' → call web_search(query='best Python web framework 2025').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "query": types.Schema(
+                    type="STRING",
+                    description="The search query (1-10 words works best)."
+                ),
+                "max_results": types.Schema(
+                    type="INTEGER",
+                    description="How many results to return (1-10). Default: 5."
+                )
+            },
+            required=["query"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="fetch_url",
+        description="Fetches the readable text content of a specific URL. USE THIS when the user shares a link, wants to read an article, summarize a webpage, or extract information from a specific page. Returns the page text (capped at max_chars, default 8000). The URL must be public (http or https); localhost and private IPs are blocked. Examples: 'summarize https://example.com/article' → call fetch_url(url='https://example.com/article'); 'read this page for me' → call fetch_url(url='...').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "url": types.Schema(
+                    type="STRING",
+                    description="The URL to fetch. Must start with http:// or https://. Localhost and private IPs are blocked for security."
+                ),
+                "max_chars": types.Schema(
+                    type="INTEGER",
+                    description="Maximum characters to return (100-50000). Default: 8000."
+                )
+            },
+            required=["url"]
+        )
+    ),
+
+    # ----- Productivity -----
+    types.FunctionDeclaration(
+        name="set_timer",
+        description="Sets a countdown timer. When the time expires, JARVIS plays a beep and announces the timer's label. USE THIS whenever the user asks for a timer, countdown, or 'remind me in N seconds/minutes/hours'. Examples: 'set a 5 minute timer' → call set_timer(seconds=300, label='5 minute timer'); 'remind me in 30 seconds' → call set_timer(seconds=30, label='reminder'); 'timer for 1 hour' → call set_timer(seconds=3600, label='hour timer'). Maximum 24 hours (86400 seconds).",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "seconds": types.Schema(
+                    type="INTEGER",
+                    description="How many seconds until the timer fires. Range: 1-86400 (24h)."
+                ),
+                "label": types.Schema(
+                    type="STRING",
+                    description="Name for the timer (e.g. 'pasta', 'workout'). Default: 'timer'."
+                )
+            },
+            required=["seconds"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="take_note",
+        description="Saves a note to a notes file in the user's Documents folder (~/Documents/JARVIS_Notes.md). USE THIS whenever the user wants to remember something, jot down a thought, or save information for later. Examples: 'remember that I need to call John tomorrow' → call take_note(text='Call John tomorrow'); 'note this: my passport number is 12345' → call take_note(text='Passport number: 12345'); 'save this idea: ...' → call take_note(text='...').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "text": types.Schema(
+                    type="STRING",
+                    description="The note content to save."
+                ),
+                "title": types.Schema(
+                    type="STRING",
+                    description="Optional title for the note. If omitted, a timestamped header is used."
+                )
+            },
+            required=["text"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="calculate",
+        description="Evaluates a math expression and returns the numeric result. Supports +, -, *, /, // (integer divide), % (modulo), ** or ^ (power), parentheses, and these math functions: sqrt, sin, cos, tan, asin, acos, atan, atan2, log, log10, log2, exp, ceil, floor, fabs, factorial, gcd, pow, radians, degrees, cosh, sinh, tanh. Also accepts constants pi, e, tau. Examples: '2+2' → call calculate(expression='2+2'); 'sqrt(144)' → call calculate(expression='sqrt(144)'); '2^10' → call calculate(expression='2^10'); 'sin(pi/2)' → call calculate(expression='sin(pi/2)').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "expression": types.Schema(
+                    type="STRING",
+                    description="Math expression like '2+2*3', 'sqrt(144)', '2^10', 'sin(pi/2)'."
+                )
+            },
+            required=["expression"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="get_definition",
+        description="Looks up the English definition of a word. USE THIS whenever the user asks 'what does X mean?', 'define X', or 'definition of X'. Returns definitions, parts of speech, and example sentences. Examples: 'what does serendipity mean?' → call get_definition(word='serendipity'); 'define ephemeral' → call get_definition(word='ephemeral').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "word": types.Schema(
+                    type="STRING",
+                    description="The English word to look up."
+                )
+            },
+            required=["word"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="translate",
+        description="Translates text into another language. USE THIS for any translation request: 'translate X to Spanish', 'how do you say X in French', 'what's X in Japanese'. Returns the translated text. Examples: 'translate hello to Spanish' → call translate(text='hello', target_lang='es'); 'how do you say good morning in Japanese?' → call translate(text='good morning', target_lang='ja'). Common codes: es=Spanish, fr=French, de=German, it=Italian, pt=Portuguese, ja=Japanese, ko=Korean, zh=Chinese, ar=Arabic, ru=Russian, hi=Hindi, en=English.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "text": types.Schema(
+                    type="STRING",
+                    description="The text to translate (up to ~500 chars)."
+                ),
+                "target_lang": types.Schema(
+                    type="STRING",
+                    description="Target language code: 'es', 'fr', 'de', 'it', 'pt', 'ja', 'ko', 'zh', 'ar', 'ru', 'hi', 'en', etc."
+                ),
+                "source_lang": types.Schema(
+                    type="STRING",
+                    description="Source language code. Default: 'en'. Set to 'auto' for auto-detect."
+                )
+            },
+            required=["text", "target_lang"]
+        )
+    ),
+
+    # ----- System -----
+    types.FunctionDeclaration(
+        name="list_processes",
+        description="Lists currently running processes (apps + background tasks) on the user's PC. USE THIS for 'what's running', 'which apps are open', 'is X running', 'what's using my CPU/memory', or to find a process to close. Returns a list with PID, name, CPU%, and memory. Examples: 'what's eating my CPU?' → call list_processes(); 'is Chrome running?' → call list_processes(name_filter='chrome'); 'show all Python processes' → call list_processes(name_filter='python').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "name_filter": types.Schema(
+                    type="STRING",
+                    description="Optional substring to filter process names (case-insensitive). E.g. 'chrome', 'python', 'discord'."
+                ),
+                "limit": types.Schema(
+                    type="INTEGER",
+                    description="Maximum processes to return. Default: 30."
+                )
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="get_active_window",
+        description="Returns the title of the currently focused (active) window. USE THIS for 'what window is active', 'what am I looking at', or 'which app is in focus'. Windows-only.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="focus_window",
+        description="Brings a window to the front and focuses it, matched by a substring of its title. USE THIS for 'switch to X', 'focus on X', 'bring X to front', 'go back to X'. Examples: 'switch to Chrome' → call focus_window(title='Chrome'); 'go back to VS Code' → call focus_window(title='Visual Studio Code'); 'focus Discord' → call focus_window(title='Discord'). Windows-only.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "title": types.Schema(
+                    type="STRING",
+                    description="Substring of the window title to match (case-insensitive). E.g. 'Chrome', 'Notepad', 'Discord'."
+                )
+            },
+            required=["title"]
         )
     ),
 ]
@@ -819,7 +1146,7 @@ function initBridge() {
     </main>
     <footer>
         <div class="input-row">
-            <input type="text" id="cmd-input" placeholder="Awaiting command, Sir..." autocomplete="off">
+            <input type="text" id="cmd-input" placeholder="Awaiting command, Sir..." autocomplete="off" onkeydown="if(event.key==='Enter' && !event.isComposing){sendCmd();return false;}">
             <button class="exec-btn" onclick="sendCmd()">EXECUTE</button>
         </div>
         <div class="controls-row">
@@ -1196,6 +1523,8 @@ class JarvisCore:
         self.reconnect_backoff = 1.0
         self.max_backoff = 60.0
         self.retry_cycle = 0
+        # Active countdown timers (set_timer). Kept so we can cancel on shutdown.
+        self._active_timers: List[threading.Timer] = []
 
         self.history: List[types.Content] = []
         self.pending_messages: List[str] = []
@@ -1308,6 +1637,10 @@ class JarvisCore:
             if hasattr(sc, 'model_turn') and sc.model_turn:
                 for part in sc.model_turn.parts:
                     try:
+                        # Skip "thought" parts — they are the model's internal
+                        # reasoning and must NOT be shown to the user.
+                        if getattr(part, 'thought', False):
+                            continue
                         if hasattr(part, 'text') and part.text:
                             chunks.append(part.text)
                     except Exception:
@@ -1653,6 +1986,96 @@ class JarvisCore:
                 else:
                     await asyncio.to_thread(pyautogui.press, key)
                 result = f"Pressed {key}."
+            elif name == "get_weather":
+                # Pass "" as default so the model can omit the arg entirely.
+                result = await asyncio.to_thread(self._tool_weather, args.get("location", ""))
+
+            # ----- Filesystem dispatch -----
+            elif name == "list_directory":
+                result = await asyncio.to_thread(self._tool_list_directory, args.get("path", ""))
+            elif name == "read_file":
+                result = await asyncio.to_thread(self._tool_read_file, args.get("path", ""))
+            elif name == "search_files":
+                result = await asyncio.to_thread(
+                    self._tool_search_files,
+                    args.get("pattern", ""),
+                    args.get("directory", ""),
+                    bool(args.get("recursive", False)),
+                )
+            elif name == "search_file_contents":
+                result = await asyncio.to_thread(
+                    self._tool_search_file_contents,
+                    args.get("query", ""),
+                    args.get("directory", ""),
+                    args.get("file_glob", ""),
+                    bool(args.get("recursive", True)),
+                )
+            elif name == "write_file":
+                result = await asyncio.to_thread(
+                    self._tool_write_file,
+                    args.get("path", ""),
+                    args.get("content", ""),
+                )
+            elif name == "move_file":
+                result = await asyncio.to_thread(
+                    self._tool_move_file,
+                    args.get("source", ""),
+                    args.get("destination", ""),
+                )
+            elif name == "create_directory":
+                result = await asyncio.to_thread(self._tool_create_directory, args.get("path", ""))
+
+            # ----- Internet dispatch -----
+            elif name == "web_search":
+                result = await asyncio.to_thread(
+                    self._tool_web_search,
+                    args.get("query", ""),
+                    int(args.get("max_results", 5) or 5),
+                )
+            elif name == "fetch_url":
+                result = await asyncio.to_thread(
+                    self._tool_fetch_url,
+                    args.get("url", ""),
+                    int(args.get("max_chars", 8000) or 8000),
+                )
+
+            # ----- Productivity dispatch -----
+            elif name == "set_timer":
+                result = await asyncio.to_thread(
+                    self._tool_set_timer,
+                    int(args.get("seconds", 0) or 0),
+                    args.get("label", "timer"),
+                )
+            elif name == "take_note":
+                result = await asyncio.to_thread(
+                    self._tool_take_note,
+                    args.get("text", ""),
+                    args.get("title", ""),
+                )
+            elif name == "calculate":
+                result = await asyncio.to_thread(self._tool_calculate, args.get("expression", ""))
+            elif name == "get_definition":
+                result = await asyncio.to_thread(self._tool_get_definition, args.get("word", ""))
+            elif name == "translate":
+                result = await asyncio.to_thread(
+                    self._tool_translate,
+                    args.get("text", ""),
+                    args.get("target_lang", ""),
+                    args.get("source_lang", "en"),
+                )
+
+            # ----- System dispatch -----
+            elif name == "list_processes":
+                result = await asyncio.to_thread(
+                    self._tool_list_processes,
+                    args.get("name_filter", ""),
+                    int(args.get("limit", 30) or 30),
+                )
+            elif name == "get_active_window":
+                result = await asyncio.to_thread(self._tool_get_active_window)
+            elif name == "focus_window":
+                result = await asyncio.to_thread(self._tool_focus_window, args.get("title", ""))
+
             else:
                 result = f"Unknown protocol: {name}"
         except Exception as e:
@@ -1722,6 +2145,898 @@ class JarvisCore:
             proc.kill()
             await proc.wait()
             return "Command timed out (30s limit)."
+
+    def _tool_weather(self, location: str = ""):
+        """Fetch current weather for a location. Empty/'auto' = IP geolocation.
+
+        Uses free public APIs (Open-Meteo + ip-api.com). No API key required.
+        """
+        try:
+            loc = (location or "").strip().lower()
+            if loc in _AUTO_LOCATION_TOKENS:
+                lat, lon, label, source = (*_weather_ip_locate(), "IP geolocation")
+            else:
+                lat, lon, label = _weather_geocode(location)
+                source = "geocoded"
+            data = _weather_fetch(lat, lon)
+            cw = data.get("current_weather") or {}
+            temp = cw.get("temperature")
+            wind = cw.get("windspeed")
+            wcode = cw.get("weathercode")
+            desc = _WEATHER_CODES.get(int(wcode) if wcode is not None else -1,
+                                      f"conditions code {wcode}")
+            # Open-Meteo provides is_day and time; surface them so the model can speak naturally.
+            is_day = cw.get("is_day")
+            t = cw.get("time")
+            parts = [
+                f"Weather for {label}",
+                f"({source}, lat {lat:.2f}, lon {lon:.2f}):",
+                f"{desc.capitalize()}.",
+                f"Temperature {temp}\u00b0F,",
+                f"wind {wind} mph.",
+            ]
+            if is_day == 0:
+                parts.append("Nighttime.")
+            elif is_day == 1:
+                parts.append("Daytime.")
+            if t:
+                parts.append(f"Observed at {t} UTC.")
+            return " ".join(parts)
+        except (urllib.error.URLError, TimeoutError) as e:
+            return f"Weather lookup failed (network error): {e}"
+        except Exception as e:
+            return f"Weather lookup failed: {e}"
+
+    # ==============================
+    # EXTENDED TOOLS
+    # ==============================
+
+    # ----- Filesystem -----
+    def _tool_list_directory(self, path: str = ""):
+        """List a directory's contents, sorted dirs-first."""
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+            if not target.exists():
+                return f"Path does not exist: {target}"
+            if not target.is_dir():
+                return f"Not a directory: {target}"
+        except Exception as e:
+            return f"Invalid path: {e}"
+
+        try:
+            entries = list(target.iterdir())
+        except PermissionError:
+            return f"Permission denied: {target}"
+        except Exception as e:
+            return f"Cannot read directory: {e}"
+
+        # Dirs first, then files; case-insensitive alpha within each group.
+        dirs = sorted([e for e in entries if e.is_dir()], key=lambda p: p.name.lower())
+        files = sorted([e for e in entries if not e.is_dir()], key=lambda p: p.name.lower())
+
+        MAX_ENTRIES = 300
+        shown_dirs = dirs[:MAX_ENTRIES]
+        shown_files = files[:MAX_ENTRIES]
+        truncated = len(dirs) + len(files) - len(shown_dirs) - len(shown_files)
+
+        lines = [f"Contents of {target} ({len(dirs)} dirs, {len(files)} files):"]
+        for d in shown_dirs:
+            lines.append(f"  [DIR]  {d.name}")
+        for f in shown_files:
+            try:
+                size = _format_size(f.stat().st_size)
+            except OSError:
+                size = "?"
+            lines.append(f"  [FILE] {f.name}  ({size})")
+        if truncated > 0:
+            lines.append(f"  ... and {truncated} more entries (capped at {MAX_ENTRIES} per type)")
+        return "\n".join(lines)
+
+    def _tool_read_file(self, path: str):
+        """Read a text file (capped at 50KB)."""
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        if not target.exists():
+            return f"File does not exist: {target}"
+        if not target.is_file():
+            return f"Not a file: {target}"
+        try:
+            size = target.stat().st_size
+        except OSError as e:
+            return f"Cannot stat file: {e}"
+
+        if size > _FILE_READ_CAP_BYTES * 4:
+            return (f"File is too large to read in one go ({_format_size(size)}). "
+                    f"Cap is ~{_format_size(_FILE_READ_CAP_BYTES)}; use search_file_contents "
+                    f"or open it in your editor instead.")
+
+        try:
+            with open(target, "rb") as f:
+                raw = f.read(_FILE_READ_CAP_BYTES + 1)
+        except PermissionError:
+            return f"Permission denied: {target}"
+        except Exception as e:
+            return f"Read failed: {e}"
+
+        truncated = len(raw) > _FILE_READ_CAP_BYTES
+        if truncated:
+            raw = raw[:_FILE_READ_CAP_BYTES]
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            try:
+                text = raw.decode("utf-8", errors="replace")
+                return (f"{text}\n\n[... file contains non-UTF-8 bytes; "
+                        f"showing replacement chars. Original size: {_format_size(size)} ...]")
+            except Exception as e:
+                return f"File is not text (likely binary): {e}"
+
+        header = f"--- {target} ({_format_size(size)}{', truncated' if truncated else ''}) ---"
+        return f"{header}\n{text}"
+
+    def _tool_search_files(self, pattern: str, directory: str = "", recursive: bool = False):
+        """Find files by name glob pattern."""
+        if not pattern:
+            return "No pattern provided."
+        try:
+            base = Path(_expand_user_path(directory)).resolve()
+        except Exception as e:
+            return f"Invalid directory: {e}"
+        if not base.exists():
+            return f"Directory does not exist: {base}"
+        if not base.is_dir():
+            return f"Not a directory: {base}"
+
+        try:
+            glob_method = base.rglob if recursive else base.glob
+            matches = sorted(glob_method(pattern))
+        except Exception as e:
+            return f"Search failed: {e}"
+
+        MAX = 500
+        shown = matches[:MAX]
+        truncated = len(matches) - len(shown)
+        if not matches:
+            return f"No files matching '{pattern}' in {base}."
+        lines = [f"{len(matches)} match(es) for '{pattern}' in {base}:"]
+        for p in shown:
+            try:
+                kind = "[DIR]" if p.is_dir() else "[FILE]"
+            except OSError:
+                kind = "[?]"
+            lines.append(f"  {kind} {p}")
+        if truncated > 0:
+            lines.append(f"  ... and {truncated} more matches (capped at {MAX})")
+        return "\n".join(lines)
+
+    def _tool_search_file_contents(self, query: str, directory: str = "",
+                                   file_glob: str = "", recursive: bool = True):
+        """Grep inside files for a regex pattern."""
+        if not query:
+            return "No query provided."
+        try:
+            regex = re.compile(query)
+        except re.error as e:
+            return f"Invalid regex: {e}"
+        try:
+            base = Path(_expand_user_path(directory)).resolve()
+        except Exception as e:
+            return f"Invalid directory: {e}"
+        if not base.exists() or not base.is_dir():
+            return f"Directory does not exist: {base}"
+
+        # Build the candidate file list once.
+        glob_method = base.rglob if recursive else base.glob
+        pattern = file_glob or "*"
+        try:
+            candidates = [p for p in glob_method(pattern) if p.is_file()]
+        except Exception as e:
+            return f"Search failed: {e}"
+
+        MAX_FILES = 2000
+        MAX_HITS = 200
+        candidates = candidates[:MAX_FILES]
+
+        hits = []
+        files_with_hits = 0
+        for fp in candidates:
+            try:
+                with open(fp, "rb") as f:
+                    raw = f.read(_FILE_READ_CAP_BYTES * 4 + 1)
+            except (PermissionError, OSError):
+                continue
+            if len(raw) > _FILE_READ_CAP_BYTES * 4:
+                continue  # skip files too large to grep safely
+            try:
+                text = raw.decode("utf-8", errors="replace")
+            except Exception:
+                continue
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if regex.search(line):
+                    snippet = line[:_FILE_READ_MAX_LINE]
+                    hits.append((fp, lineno, snippet))
+                    files_with_hits += 1 if lineno == 1 or len(hits) == 1 else 0
+                    if len(hits) >= MAX_HITS:
+                        break
+            if len(hits) >= MAX_HITS:
+                break
+
+        if not hits:
+            return f"No matches for /{query}/ in {base}."
+
+        lines = [f"{len(hits)} match(es) for /{query}/ in {base}:"]
+        for fp, lineno, snippet in hits:
+            lines.append(f"  {fp}:{lineno}: {snippet}")
+        return "\n".join(lines)
+
+    def _tool_write_file(self, path: str, content: str):
+        """Create or overwrite a text file (auto-mkdir parents)."""
+        if not path:
+            return "No path provided."
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return f"Cannot create parent directory: {e}"
+        try:
+            target.write_text(content or "", encoding="utf-8")
+        except PermissionError:
+            return f"Permission denied writing to {target}"
+        except Exception as e:
+            return f"Write failed: {e}"
+        size = target.stat().st_size if target.exists() else 0
+        return f"Wrote {len(content or '')} characters ({_format_size(size)}) to {target}."
+
+    def _tool_move_file(self, source: str, destination: str):
+        """Move/rename a file or folder."""
+        if not source or not destination:
+            return "Both source and destination are required."
+        try:
+            src = Path(_expand_user_path(source)).resolve()
+            dst = Path(_expand_user_path(destination)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        if not src.exists():
+            return f"Source does not exist: {src}"
+        if dst.exists():
+            return f"Destination already exists: {dst}"
+        try:
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(src), str(dst))
+        except Exception as e:
+            return f"Move failed: {e}"
+        return f"Moved {src} → {dst}."
+
+    def _tool_create_directory(self, path: str):
+        """Create a directory (and parents)."""
+        if not path:
+            return "No path provided."
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            return f"mkdir failed: {e}"
+        return f"Directory ready: {target}."
+
+    # ----- Internet -----
+    def _tool_web_search(self, query: str, max_results: int = 5):
+        """DuckDuckGo HTML search."""
+        return _web_search_ddg(query, max_results)
+
+    def _tool_fetch_url(self, url: str, max_chars: int = 8000):
+        """Fetch a URL and return extracted text."""
+        return _fetch_url_text(url, max_chars)
+
+    # ----- Productivity -----
+    def _tool_set_timer(self, seconds: int, label: str = "timer"):
+        """Schedule a one-shot timer with a beep + log line on fire."""
+        try:
+            seconds = int(seconds)
+        except (TypeError, ValueError):
+            return f"Invalid seconds value: {seconds!r}"
+        if seconds < 1:
+            return "Timer must be at least 1 second."
+        if seconds > 86400:
+            return "Timer cannot exceed 24 hours (86400 seconds)."
+        label = (label or "timer").strip() or "timer"
+
+        def _fire():
+            try:
+                self._emit_log("TIMER", f"\u23f0 {label} — time's up!")
+            except Exception:
+                pass
+            try:
+                if winsound:
+                    for _ in range(3):
+                        winsound.Beep(880, 250)
+                        time.sleep(0.1)
+            except Exception:
+                pass
+
+        timer = threading.Timer(seconds, _fire)
+        timer.daemon = True
+        self._active_timers.append(timer)
+        timer.start()
+
+        if seconds >= 3600 and seconds % 3600 == 0:
+            pretty = f"{seconds // 3600} hour(s)"
+        elif seconds >= 60 and seconds % 60 == 0:
+            pretty = f"{seconds // 60} minute(s)"
+        else:
+            pretty = f"{seconds} second(s)"
+        return f"Timer '{label}' set for {pretty}."
+
+    def _tool_take_note(self, text: str, title: str = ""):
+        """Append a markdown note to ~/Documents/JARVIS_Notes.md."""
+        if not text:
+            return "No note text provided."
+        try:
+            docs = Path.home() / "Documents"
+            if not docs.exists():
+                # Fallback to home directory if Documents is missing.
+                docs = Path.home()
+            notes_path = docs / "JARVIS_Notes.md"
+        except Exception as e:
+            return f"Cannot resolve notes path: {e}"
+
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        heading = (title or "").strip() or f"Note @ {ts}"
+        try:
+            with open(notes_path, "a", encoding="utf-8") as f:
+                f.write(f"\n## {heading}\n*{ts}*\n\n{text}\n")
+        except PermissionError:
+            return f"Permission denied writing to {notes_path}"
+        except Exception as e:
+            return f"Failed to save note: {e}"
+        return f"Note saved to {notes_path}."
+
+    def _tool_calculate(self, expression: str):
+        """Safely evaluate a math expression."""
+        return _safe_eval_math(expression)
+
+    def _tool_get_definition(self, word: str):
+        """Look up an English word's definition."""
+        return _get_definition(word)
+
+    def _tool_translate(self, text: str, target_lang: str, source_lang: str = "en"):
+        """Translate text via MyMemory."""
+        return _translate_text(text, target_lang, source_lang)
+
+    # ----- System -----
+    def _tool_list_processes(self, name_filter: str = "", limit: int = 30):
+        """List running processes, sorted by CPU% desc."""
+        try:
+            limit = max(1, min(500, int(limit or 30)))
+        except (TypeError, ValueError):
+            limit = 30
+        filt = (name_filter or "").lower().strip()
+
+        rows = []
+        for p in psutil.process_iter(attrs=["pid", "name", "cpu_percent", "memory_percent"]):
+            try:
+                info = p.info
+                name = info.get("name") or "?"
+                if filt and filt not in name.lower():
+                    continue
+                cpu = info.get("cpu_percent") or 0.0
+                mem = info.get("memory_percent") or 0.0
+                rows.append((info.get("pid"), name, cpu, mem))
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        # Sort by CPU% desc, then by name.
+        rows.sort(key=lambda r: (-r[2], r[1].lower()))
+
+        if not rows:
+            return f"No processes matched filter '{filt}'." if filt else "No processes found."
+
+        shown = rows[:limit]
+        truncated = len(rows) - len(shown)
+        lines = [f"{len(rows)} process(es)" + (f" matching '{filt}'" if filt else "") + ":"]
+        lines.append(f"  {'PID':>7}  {'CPU%':>6}  {'MEM%':>6}  NAME")
+        for pid, name, cpu, mem in shown:
+            try:
+                pid_str = f"{pid:>7}" if pid is not None else "      ?"
+            except Exception:
+                pid_str = "      ?"
+            lines.append(f"  {pid_str}  {cpu:>6.1f}  {mem:>6.1f}  {name}")
+        if truncated > 0:
+            lines.append(f"  ... and {truncated} more (capped at {limit})")
+        return "\n".join(lines)
+
+    def _tool_get_active_window(self) -> str:
+        """Return the title of the currently focused window (Windows-only)."""
+        if os.name != "nt":
+            return "[get_active_window is only supported on Windows]"
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return "[no foreground window]"
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length == 0:
+                return "[window has no title]"
+            buff = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buff, length + 1)
+            return f"Active window: {buff.value}"
+        except Exception as e:
+            return f"Could not read active window: {e}"
+
+    def _tool_focus_window(self, title: str) -> str:
+        """Bring a window to front by title substring (Windows-only)."""
+        if os.name != "nt":
+            return "[focus_window is only supported on Windows]"
+        if not title or not title.strip():
+            return "No title provided."
+        needle = title.lower().strip()
+
+        try:
+            user32 = ctypes.windll.user32
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+            found = {"hwnd": None, "title": ""}
+
+            def _cb(hwnd, _lParam):
+                try:
+                    if not user32.IsWindowVisible(hwnd):
+                        return True
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    if length == 0:
+                        return True
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    if needle in buff.value.lower():
+                        found["hwnd"] = hwnd
+                        found["title"] = buff.value
+                        return False  # stop enumeration
+                except Exception:
+                    pass
+                return True
+
+            user32.EnumWindows(EnumWindowsProc(_cb), 0)
+            if found["hwnd"] is None:
+                return f"No visible window with title containing '{title}'."
+
+            # Restore if minimized, then bring to front.
+            if user32.IsIconic(found["hwnd"]):
+                user32.ShowWindow(found["hwnd"], 9)  # SW_RESTORE
+            user32.SetForegroundWindow(found["hwnd"])
+            return f"Focused window: {found['title']}"
+        except Exception as e:
+            return f"focus_window failed: {e}"
+
+
+# ==========================================
+# WEATHER (free public APIs, no key required)
+# ==========================================
+# WMO weather interpretation codes used by Open-Meteo.
+_WEATHER_CODES = {
+    0: "clear sky",
+    1: "mainly clear",
+    2: "partly cloudy",
+    3: "overcast",
+    45: "fog",
+    48: "depositing rime fog",
+    51: "light drizzle",
+    53: "moderate drizzle",
+    55: "dense drizzle",
+    56: "light freezing drizzle",
+    57: "dense freezing drizzle",
+    61: "slight rain",
+    63: "moderate rain",
+    65: "heavy rain",
+    66: "light freezing rain",
+    67: "heavy freezing rain",
+    71: "slight snowfall",
+    73: "moderate snowfall",
+    75: "heavy snowfall",
+    77: "snow grains",
+    80: "slight rain showers",
+    81: "moderate rain showers",
+    82: "violent rain showers",
+    85: "slight snow showers",
+    86: "heavy snow showers",
+    95: "thunderstorm",
+    96: "thunderstorm with slight hail",
+    99: "thunderstorm with heavy hail",
+}
+
+# Phrases that mean "use my current location".
+_AUTO_LOCATION_TOKENS = frozenset({
+    "", "auto", "current", "here", "my location", "me", "my city", "where i am",
+})
+
+
+def _http_get_json(url: str, timeout: float = 6.0) -> dict:
+    """Synchronous HTTP GET that returns parsed JSON. Raises on any failure."""
+    req = urllib.request.Request(url, headers={"User-Agent": "JARVIS/2.0 (+local-assistant)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+        if not raw:
+            raise RuntimeError("empty response")
+        return json.loads(raw.decode("utf-8", errors="replace"))
+
+
+def _weather_ip_locate() -> tuple:
+    """Return (lat, lon, label) for the user's public IP. No key required."""
+    data = _http_get_json(
+        "http://ip-api.com/json/?fields=status,city,lat,lon,regionName,country"
+    )
+    if data.get("status") != "success":
+        raise RuntimeError(f"IP geolocation failed: {data.get('message', 'unknown error')}")
+    if "lat" not in data or "lon" not in data:
+        raise RuntimeError("IP geolocation returned no coordinates")
+    city = data.get("city") or "?"
+    region = data.get("regionName") or "?"
+    country = data.get("country") or "?"
+    parts = [p for p in (city, region, country) if p and p != "?"]
+    label = ", ".join(parts) if parts else "your location"
+    return (float(data["lat"]), float(data["lon"]), label)
+
+
+def _weather_geocode(name: str) -> tuple:
+    """Return (lat, lon, label) for a place name via Open-Meteo geocoding (free)."""
+    q = urllib.parse.quote(name.strip())
+    url = f"https://geocoding-api.open-meteo.com/v1/search?name={q}&count=1&language=en&format=json"
+    data = _http_get_json(url)
+    results = data.get("results") or []
+    if not results:
+        raise RuntimeError(f"Location not found: '{name}'")
+    r = results[0]
+    label = ", ".join(x for x in (r.get("name"), r.get("admin1"), r.get("country")) if x)
+    return (float(r["latitude"]), float(r["longitude"]), label or name)
+
+
+def _weather_fetch(lat: float, lon: float) -> dict:
+    """Fetch current weather from Open-Meteo (free, no key). Fahrenheit + mph."""
+    url = (
+        f"https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lat}&longitude={lon}"
+        f"&current_weather=true"
+        f"&temperature_unit=fahrenheit"
+        f"&windspeed_unit=mph"
+    )
+    return _http_get_json(url)
+
+
+# ==========================================
+# EXTENDED TOOL HELPERS (filesystem, web, system, math)
+# ==========================================
+
+# Read cap for read_file (50KB), write cap note, etc.
+_FILE_READ_CAP_BYTES = 50_000
+_FILE_READ_MAX_LINE = 2_000          # max bytes per line to keep one giant line from blowing the cap
+_FETCH_MAX_BYTES = 5_000_000         # 5MB safety cap on any HTTP response
+_SEARCH_MAX_RESULTS = 10
+_HTTP_TIMEOUT = 10.0
+
+# Math: whitelisted function names from the math module + safe constants.
+_MATH_SAFE_FUNCS = {
+    "sqrt", "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "log", "log10", "log2", "exp", "ceil", "floor", "fabs",
+    "factorial", "gcd", "pow", "radians", "degrees",
+    "cosh", "sinh", "tanh", "hypot",
+}
+_MATH_SAFE_NAMES = {"pi": math.pi, "e": math.e, "tau": math.tau}
+
+
+class _HTMLTextExtractor(html.parser.HTMLParser):
+    """Convert HTML to readable plain text. Skips script/style/iframe/svg."""
+    _BLOCK_TAGS = {
+        "p", "div", "br", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+        "tr", "td", "th", "blockquote", "pre", "section", "article", "header", "footer",
+    }
+    _SKIP_TAGS = {"script", "style", "noscript", "iframe", "svg", "head"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._chunks = []
+        self._skip_depth = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() in self._SKIP_TAGS:
+            self._skip_depth += 1
+        if self._skip_depth == 0 and tag.lower() in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag.lower() in self._SKIP_TAGS:
+            self._skip_depth = max(0, self._skip_depth - 1)
+        if self._skip_depth == 0 and tag.lower() in self._BLOCK_TAGS:
+            self._chunks.append("\n")
+
+    def handle_data(self, data):
+        if self._skip_depth == 0:
+            self._chunks.append(data)
+
+    def get_text(self) -> str:
+        text = "".join(self._chunks)
+        text = re.sub(r"\n\s*\n+", "\n\n", text)
+        text = re.sub(r"[ \t]+", " ", text)
+        return text.strip()
+
+
+def _is_safe_url(url: str) -> tuple:
+    """Return (ok, reason). Blocks non-http(s), localhost, and private/loopback IPs.
+    Resolves hostnames so DNS-rebinding and direct private IPs are caught."""
+    try:
+        parsed = urllib.parse.urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            return (False, f"scheme '{parsed.scheme}' not allowed (use http or https)")
+        host = parsed.hostname
+        if not host:
+            return (False, "URL has no host")
+        if host.lower() in ("localhost", "ip6-localhost", "ip6-loopback"):
+            return (False, "localhost blocked for security")
+
+        # If host is an IP literal, check directly. Otherwise resolve and check every addr.
+        try:
+            ip = ipaddress.ip_address(host)
+            addresses = [ip]
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, None)
+            except socket.gaierror as e:
+                return (False, f"DNS resolution failed: {e}")
+            addresses = []
+            for info in infos:
+                try:
+                    addresses.append(ipaddress.ip_address(info[4][0]))
+                except (ValueError, IndexError):
+                    pass
+            if not addresses:
+                return (False, "no addresses resolved for host")
+
+        for ip in addresses:
+            if (ip.is_private or ip.is_loopback or ip.is_link_local
+                    or ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                return (False, f"address {ip} is private/loopback — blocked")
+
+        return (True, "")
+    except Exception as e:
+        return (False, f"URL validation error: {e}")
+
+
+def _http_get_bytes(url: str, timeout: float = _HTTP_TIMEOUT,
+                    max_bytes: int = _FETCH_MAX_BYTES) -> bytes:
+    """GET a URL and return raw bytes (capped). Raises on any failure."""
+    req = urllib.request.Request(url, headers={"User-Agent": "JARVIS/2.0 (+local-assistant)"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # Read in chunks so we can stop as soon as we hit max_bytes.
+        out = bytearray()
+        while len(out) < max_bytes + 1:
+            chunk = resp.read(65536)
+            if not chunk:
+                break
+            out.extend(chunk)
+            if len(out) > max_bytes:
+                break
+        return bytes(out[:max_bytes])
+
+
+def _http_get_text(url: str, timeout: float = _HTTP_TIMEOUT,
+                   max_bytes: int = _FETCH_MAX_BYTES) -> str:
+    """GET a URL and return decoded text. Cap response at max_bytes."""
+    raw = _http_get_bytes(url, timeout=timeout, max_bytes=max_bytes)
+    return raw.decode("utf-8", errors="replace")
+
+
+def _expand_user_path(p: str) -> str:
+    """Expand ~ to the user's home directory and normalize."""
+    if not p:
+        return str(Path.home())
+    return os.path.expanduser(os.path.expandvars(p))
+
+
+def _format_size(n: int) -> str:
+    """Human-readable byte size."""
+    n = max(0, int(n))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024.0:
+            return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
+        n /= 1024.0
+    return f"{n:.1f}PB"
+
+
+def _web_search_ddg(query: str, max_results: int = 5) -> str:
+    """Search DuckDuckGo HTML endpoint (no API key) and return top results."""
+    max_results = max(1, min(_SEARCH_MAX_RESULTS, int(max_results or 5)))
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    try:
+        html_text = _http_get_text(url, timeout=_HTTP_TIMEOUT)
+    except Exception as e:
+        return f"Search failed: {e}"
+
+    title_pat = re.compile(
+        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    snippet_pat = re.compile(
+        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    tag_pat = re.compile(r"<[^>]+>")
+
+    titles = title_pat.findall(html_text)
+    snippets = snippet_pat.findall(html_text)
+
+    results = []
+    for i, (link, title_html) in enumerate(titles[:max_results]):
+        title = html.unescape(tag_pat.sub("", title_html)).strip()
+        if not title:
+            continue
+        snippet = ""
+        if i < len(snippets):
+            snippet = html.unescape(tag_pat.sub("", snippets[i])).strip()
+        # DuckDuckGo wraps result URLs in a redirector; unwrap uddg=... if present.
+        actual_url = link
+        m = re.search(r"uddg=([^&]+)", link)
+        if m:
+            actual_url = urllib.parse.unquote(m.group(1))
+        results.append(f"{len(results) + 1}. {title}\n   {actual_url}\n   {snippet}")
+
+    if not results:
+        return f"No results found for '{query}'."
+    return f"Top {len(results)} result(s) for '{query}':\n\n" + "\n\n".join(results)
+
+
+def _fetch_url_text(url: str, max_chars: int = 8000) -> str:
+    """Fetch a URL and return extracted readable text, capped at max_chars."""
+    max_chars = max(100, min(50000, int(max_chars or 8000)))
+    ok, reason = _is_safe_url(url)
+    if not ok:
+        return f"URL rejected: {reason}"
+    try:
+        raw = _http_get_bytes(url, timeout=_HTTP_TIMEOUT, max_bytes=_FETCH_MAX_BYTES)
+    except (urllib.error.URLError, TimeoutError) as e:
+        return f"Fetch failed (network error): {e}"
+    except Exception as e:
+        return f"Fetch failed: {e}"
+
+    # Quick content-type sniff to avoid parsing images/binary as HTML.
+    head = raw[:512].lower()
+    if b"<html" in head or b"<!doctype" in head or b"<head" in head or b"<body" in head:
+        try:
+            parser = _HTMLTextExtractor()
+            parser.feed(raw.decode("utf-8", errors="replace"))
+            text = parser.get_text()
+        except Exception as e:
+            return f"HTML parse failed: {e}"
+    else:
+        # Plain text response
+        text = raw.decode("utf-8", errors="replace")
+
+    if len(text) > max_chars:
+        text = text[:max_chars] + f"\n\n[... truncated at {max_chars} characters ...]"
+    return text or "[empty response]"
+
+
+def _get_definition(word: str) -> str:
+    """Look up an English word via the free dictionaryapi.dev."""
+    word = (word or "").strip().lower()
+    if not word:
+        return "No word provided."
+    if not re.fullmatch(r"[a-zA-Z\-']+", word):
+        return f"'{word}' is not a valid English word to look up."
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}"
+    try:
+        data = _http_get_json(url, timeout=_HTTP_TIMEOUT)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return f"No definition found for '{word}'."
+        return f"Dictionary lookup failed (HTTP {e.code}): {e.reason}"
+    except Exception as e:
+        return f"Dictionary lookup failed: {e}"
+
+    if not isinstance(data, list) or not data:
+        return f"No definition found for '{word}'."
+
+    parts = [f"Definitions of '{data[0].get('word', word)}':"]
+    phonetic = data[0].get("phonetic")
+    if phonetic:
+        parts.append(f"  Pronunciation: {phonetic}")
+
+    for entry in data[:3]:
+        for meaning in entry.get("meanings", [])[:2]:
+            pos = meaning.get("partOfSpeech", "")
+            defs = meaning.get("definitions", [])
+            for i, d in enumerate(defs[:3], 1):
+                definition = d.get("definition", "").strip()
+                example = d.get("example", "").strip()
+                parts.append(f"  {pos}. {i}. {definition}")
+                if example:
+                    parts.append(f"     e.g. {example}")
+    return "\n".join(parts)
+
+
+def _translate_text(text: str, target_lang: str, source_lang: str = "en") -> str:
+    """Translate via MyMemory free API (no key, ~5000 chars/day per IP)."""
+    text = (text or "").strip()
+    if not text:
+        return "No text provided to translate."
+    if not target_lang:
+        return "No target language provided."
+    source = (source_lang or "en").strip().lower()
+    target = target_lang.strip().lower()
+    if source == "auto":
+        source = "en"  # MyMemory doesn't have a true auto-detect; default to en
+    url = (
+        "https://api.mymemory.translated.net/get?"
+        + urllib.parse.urlencode({"q": text, "langpair": f"{source}|{target}"})
+    )
+    try:
+        data = _http_get_json(url, timeout=_HTTP_TIMEOUT)
+    except Exception as e:
+        return f"Translation failed: {e}"
+    response = data.get("responseData") or {}
+    translated = response.get("translatedText", "").strip()
+    if not translated:
+        return f"Translation returned no result for '{text}'."
+    # MyMemory sometimes encodes the response as a URL-encoded string; fix common ones.
+    try:
+        translated = html.unescape(translated)
+    except Exception:
+        pass
+    return f"{source} → {target}: {translated}"
+
+
+def _safe_eval_math(expr: str) -> str:
+    """Evaluate a math expression with AST whitelisting. No names outside math.* allowed."""
+    expr = (expr or "").strip()
+    if not expr:
+        return "Empty expression."
+    # Allow users to type '^' for power.
+    expr = expr.replace("^", "**")
+    try:
+        tree = ast.parse(expr, mode="eval")
+    except SyntaxError as e:
+        return f"Invalid expression: {e.msg}"
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Expression):
+            continue
+        elif isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Load)):
+            continue
+        elif isinstance(node, ast.Constant):
+            if not isinstance(node.value, (int, float)):
+                return f"Only numbers allowed; got {type(node.value).__name__}"
+        elif isinstance(node, ast.Call):
+            if not isinstance(node.func, ast.Name) or node.func.id not in _MATH_SAFE_FUNCS:
+                fname = getattr(node.func, "id", "?")
+                return f"Function '{fname}' not allowed"
+        elif isinstance(node, ast.Name):
+            if node.id in _MATH_SAFE_FUNCS or node.id in _MATH_SAFE_NAMES:
+                continue
+            return f"Unknown identifier: '{node.id}'"
+        else:
+            return f"Disallowed construct: {type(node).__name__}"
+
+    safe_locals = dict(_MATH_SAFE_NAMES)
+    for name in _MATH_SAFE_FUNCS:
+        if hasattr(math, name):
+            safe_locals[name] = getattr(math, name)
+
+    try:
+        result = eval(compile(tree, "<math>", "eval"),
+                      {"__builtins__": {}}, safe_locals)
+    except Exception as e:
+        return f"Evaluation error: {e}"
+
+    if isinstance(result, float):
+        if math.isnan(result):
+            return "NaN"
+        if math.isinf(result):
+            return "Infinity" if result > 0 else "-Infinity"
+        if result.is_integer() and abs(result) < 1e16:
+            return str(int(result))
+        return f"{result:.10g}"
+    return str(result)
 
 
 # ==========================================
