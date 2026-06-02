@@ -1,4 +1,4 @@
-# 🚀 J.A.R.V.I.S. Core Matrix (Mark XL)[BETA]
+# 🚀 J.A.R.V.I.S. Core Matrix (Mark XLV)[BETA]
 
 A voice-activated, cyberpunk-inspired desktop AI assistant. This architecture wraps a responsive HTML5/CSS3 HUD inside a native **PyQt6** application window, leveraging **Google GenAI** to bridge advanced LLM cognition with local system automation.
 
