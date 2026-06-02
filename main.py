@@ -1492,8 +1492,15 @@ class JarvisCore:
 
     def _on_watchdog_timeout(self):
         if self.get_state() == "THINKING":
-            self._emit_log("SYSTEM", "Neural response timeout. Link may be congested or model is unresponsive.")
+            # The state being THINKING means a tool call was emitted but no
+            # turn_complete or follow-up text arrived within the timeout. Most
+            # often this is the model hanging on a chained tool call, a slow
+            # tool response send, or a session that lost the response stream.
+            self._emit_log("SYSTEM",
+                "Neural response timeout. The model did not produce a follow-up "
+                "response after the last tool call. The session will reset.")
             self.set_state("READY")
+            self.watchdog.stop()
 
     def _schedule(self, coro, desc: str = "task"):
         """Thread-safe wrapper around run_coroutine_threadsafe that survives
@@ -1817,18 +1824,32 @@ class JarvisCore:
                 if new_handle:
                     self.resumption_token = new_handle
 
-            if not (hasattr(response, 'server_content') and response.server_content):
+            has_server = hasattr(response, 'server_content') and response.server_content
+            has_tool = hasattr(response, 'tool_call') and response.tool_call
+
+            # Early return ONLY if there's truly nothing to do. A response with
+            # tool_call but no server_content (model calls a function without
+            # speaking) MUST still be processed, otherwise the model waits
+            # forever for a tool response and the next watchdog tick fires the
+            # misleading "Neural response timeout" message.
+            if not (has_server or has_tool):
                 return
 
-            sc = response.server_content
+            sc = response.server_content if has_server else None
 
             # Audio playback
-            if hasattr(sc, 'model_turn') and sc.model_turn:
+            if sc and hasattr(sc, 'model_turn') and sc.model_turn:
                 for part in sc.model_turn.parts:
                     if hasattr(part, 'inline_data') and part.inline_data and getattr(part.inline_data, 'data', None):
                         if self.voice_enabled:
                             self.set_state("SPEAKING")
                             self.audio_player.feed(part.inline_data.data)
+                # If the model produced audio (or even empty model_turn parts)
+                # without text, that still counts as activity — reset the
+                # watchdog so audio-only synthesis doesn't get killed mid-stream.
+                if sc.model_turn.parts:
+                    self.watchdog.stop()
+                    self.watchdog.start()
 
             # Text extraction (multi-source)
             text = self._extract_text(response)
@@ -1840,7 +1861,7 @@ class JarvisCore:
                 self.watchdog.start()
 
             # Turn complete
-            if getattr(sc, 'turn_complete', False):
+            if sc and getattr(sc, 'turn_complete', False):
                 self.watchdog.stop()
                 with self._response_lock:
                     if self._response_buffer:
@@ -1850,9 +1871,15 @@ class JarvisCore:
                 self.set_state("READY")
 
             # Tool calls
-            if hasattr(response, 'tool_call') and response.tool_call:
-                calls = response.tool_call.function_calls
-                if calls:
+            if has_tool:
+                calls = response.tool_call.function_calls or []
+                if not calls:
+                    # Empty tool_call payload — nothing to execute. Make sure
+                    # the watchdog isn't left running from a previous turn.
+                    if self.get_state() == "THINKING":
+                        self.set_state("READY")
+                        self.watchdog.stop()
+                else:
                     self.set_state("THINKING")
                     self.watchdog.start()
                     with self._response_lock:
@@ -1861,8 +1888,10 @@ class JarvisCore:
                             self._response_buffer = ""
                     for call in calls:
                         await self._execute_tool(call)
+                    # Note: we keep the watchdog running here so we can detect
+                    # if the model hangs while generating the final response
+                    # after the tool result. turn_complete (above) will stop it.
                     self.set_state("READY")
-                    self.watchdog.stop()
 
         except Exception as e:
             self._emit_log("SYSTEM", f"Response processing error: {e}")
@@ -2001,11 +2030,27 @@ class JarvisCore:
 
         if self.session and self.session_ready.is_set():
             try:
-                await self.session.send_tool_response(
-                    function_responses=[types.FunctionResponse(name=name, id=call_id, response={"result": result})]
+                # Bound the send: if the API is stuck or the id mismatches and
+                # the session silently drops the response, this would otherwise
+                # hang the receive loop forever (and fire the watchdog after
+                # 45s with a misleading "Neural response timeout" message).
+                await asyncio.wait_for(
+                    self.session.send_tool_response(
+                        function_responses=[types.FunctionResponse(
+                            name=name, id=call_id, response={"result": result}
+                        )]
+                    ),
+                    timeout=10.0,
                 )
+            except asyncio.TimeoutError:
+                self._emit_log("SYSTEM",
+                    f"Tool response send for '{name}' timed out after 10s. "
+                    f"Session may be stuck — re-linking.")
             except Exception as e:
                 self._emit_log("SYSTEM", f"Tool response transmission failed: {e}")
+        else:
+            self._emit_log("SYSTEM",
+                f"Tool '{name}' result not delivered (no active session).")
 
     def _tool_open_app(self, command: str):
         try:
