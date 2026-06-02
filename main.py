@@ -5,19 +5,27 @@ import asyncio
 import threading
 import io
 import time
+import random
+import math
+import struct
 import ctypes
+import platform
+import subprocess
 from pathlib import Path
+from typing import List, Optional, Callable
+
 import pyautogui
 import psutil
 import pyperclip
 import sounddevice as sd
 import queue
-from PIL import Image
-from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal
+
+from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt
 from PyQt6.QtWidgets import QApplication, QMainWindow
 from PyQt6.QtWebEngineCore import QWebEngineProfile
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
+
 from google import genai
 from google.genai import types
 
@@ -27,923 +35,755 @@ from google.genai import types
 BASE_DIR = Path(__file__).resolve().parent
 API_CONFIG_PATH = BASE_DIR / "api_keys.json"
 
-SYSTEM_PROMPT = """\
-You are J.A.R.V.I.S., a super-intelligent AI persona. \
-Your tone is sophisticated, articulate, and slightly witty.\
-You have direct system access via tools. Use them whenever necessary.\
-Crucial: Do not repeat your introductory greeting if the conversation is already underway. \
-Provide concise, high-signal intelligence. Focus on accuracy and efficiency.
+MODEL_POOL = [
+    "gemini-2.5-flash-native-audio-latest",
+    "gemini-2.0-flash-live-preview-04-09",
+]
 
-ABSOLUTE STATE-FREE MANDATE — STRICT ENFORCEMENT:
-- You have ZERO memory of any prior turns. Each user message is a COMPLETELY STANDALONE directive.
-- NEVER reference, repeat, build upon, or acknowledge anything from previous turns.
-- Treat every message as if the conversation has just started and the user is giving you their first command.
-- The past does not exist. Do not say "as you previously asked", "continuing from before", "as mentioned earlier", or any variant of referring to history.
-- If the user gives a new request, execute it fresh. Do not merge it with prior context.
-- Exception: Only if the user explicitly says "continue from the previous task" or similar, may you reference the immediate prior turn.
+MAX_HISTORY = 20
+MAX_PENDING = 50
+AUDIO_SR_OUT = 24000
+AUDIO_SR_IN = 16000
+TELEMETRY_INTERVAL_MS = 1000
 
-Current Neural Matrix: Mark XL.
-Current Time: {time}
+SYSTEM_PROMPT = """You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), Tony Stark's personal AI assistant.
+You are operating inside a secure local core matrix with direct system-level tool access.
+Persona: sophisticated, articulate, precise, calm, and professionally witty.
+Address the user as "Sir" or "Madam" unless instructed otherwise.
+Maintain full conversational memory; build upon prior context naturally.
+Do not repeat greetings if the conversation is already underway.
+Provide concise, high-signal responses. Accuracy and operational efficiency are paramount.
+When using tools, confirm actions briefly and report outcomes.
+
+Current Time: {time} | Date: {date}
 """
 
+# ==========================================
+# TOOL SCHEMAS
+# ==========================================
+JARVIS_TOOLS = [
+    types.FunctionDeclaration(
+        name="open_application",
+        description="Launches an application or opens a file path.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"command": types.Schema(type="STRING", description="Executable path or system command.")},
+            required=["command"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="take_screenshot",
+        description="Captures the screen and transmits it for visual analysis.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_system_info",
+        description="Retrieves system diagnostics: OS, CPU, memory, battery.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="execute_shell",
+        description="Executes a shell command and returns stdout output.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"command": types.Schema(type="STRING", description="Shell command to run.")},
+            required=["command"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="read_clipboard",
+        description="Reads the current text content from the system clipboard.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="write_clipboard",
+        description="Writes text to the system clipboard.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"text": types.Schema(type="STRING", description="Text to copy.")},
+            required=["text"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="type_text",
+        description="Simulates typing text into the active window.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"text": types.Schema(type="STRING", description="Text to type.")},
+            required=["text"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="press_key",
+        description="Simulates a keypress or combination (e.g., 'enter', 'ctrl+c').",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"key": types.Schema(type="STRING", description="Key or combo to press.")},
+            required=["key"]
+        )
+    ),
+]
 
+# ==========================================
+# UI HTML / CSS / JS
+# ==========================================
 UI_HTML = """
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>J.A.R.V.I.S. Core Matrix HUD</title>
-    <!-- Import Futuristic & Clean Fonts -->
-    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;600;700;900&family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
-    <!-- Import Markdown and Code Highlighting CDNs -->
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S. Core Matrix</title>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;900&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" async></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js" async></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js" async></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <style>
         :root {
-            --glow-ready: #00f0ff;
-            --glow-thinking: #ffb703;
-            --glow-lost: #ff4d4d;
-            --glow-listening: #00f5d4;
-            --glow-speaking: #00bbf9;
-            --panel-bg: rgba(6, 15, 38, 0.45);
-            --border-neon: rgba(0, 240, 255, 0.18);
+            --jarvis-cyan: #00d4ff;
+            --jarvis-blue: #0066cc;
+            --jarvis-glow: rgba(0, 212, 255, 0.25);
+            --jarvis-dark: #02050f;
+            --jarvis-panel: rgba(4, 14, 32, 0.65);
+            --jarvis-border: rgba(0, 212, 255, 0.12);
+            --text-primary: #e0f7ff;
+            --text-dim: #5a7a99;
             --font-display: 'Orbitron', sans-serif;
-            --font-sans: 'Inter', sans-serif;
+            --font-body: 'Inter', sans-serif;
             --font-mono: 'JetBrains Mono', monospace;
         }
-        
-        * { box-sizing: border-box; }
-        
+        * { box-sizing: border-box; margin: 0; padding: 0; }
         body {
-            margin: 0; padding: 0;
-            background: #02050f; color: #d1e9ff;
-            font-family: var(--font-sans);
-            overflow: hidden; height: 100vh;
-            display: flex; flex-direction: column;
-            background-image: 
-                radial-gradient(circle at 50% 50%, rgba(3, 17, 51, 0.85) 0%, #02050f 90%),
-                linear-gradient(rgba(0, 240, 255, 0.015) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(0, 240, 255, 0.015) 1px, transparent 1px);
-            background-size: 100% 100%, 40px 40px, 40px 40px;
+            background: var(--jarvis-dark);
+            color: var(--text-primary);
+            font-family: var(--font-body);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(10, 30, 60, 0.4) 0%, transparent 70%),
+                linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+            background-size: 100% 100%, 50px 50px, 50px 50px;
+        }
+        body::after {
+            content: ''; position: absolute; inset: 0;
+            background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 4px);
+            pointer-events: none; z-index: 999; opacity: 0.3;
         }
 
-        /* High-tech overlay elements */
-        body::before {
-            content: ''; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-            background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.03), rgba(0, 255, 0, 0.01), rgba(0, 0, 255, 0.03));
-            background-size: 100% 4px, 6px 100%; z-index: 100; pointer-events: none; opacity: 0.4;
+        /* Boot */
+        #boot-overlay {
+            position: fixed; inset: 0; background: var(--jarvis-dark); z-index: 1000;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            transition: opacity 1.2s ease-out;
         }
+        #boot-overlay.fade-out { opacity: 0; pointer-events: none; }
+        .boot-logo {
+            font-family: var(--font-display); font-size: 52px; font-weight: 900;
+            letter-spacing: 14px; color: var(--jarvis-cyan);
+            text-shadow: 0 0 40px var(--jarvis-glow);
+            animation: boot-pulse 1.5s ease-in-out infinite;
+        }
+        .boot-sub {
+            font-family: var(--font-display); font-size: 11px; letter-spacing: 6px;
+            color: var(--text-dim); margin-top: 14px;
+        }
+        .boot-bar {
+            width: 240px; height: 2px; background: rgba(0,212,255,0.1);
+            margin-top: 30px; border-radius: 1px; overflow: hidden;
+        }
+        .boot-bar-inner {
+            height: 100%; width: 0%; background: var(--jarvis-cyan);
+            box-shadow: 0 0 10px var(--jarvis-cyan);
+            animation: boot-load 2.2s ease-out forwards;
+        }
+        @keyframes boot-pulse { 0%, 100% { opacity: 0.6; } 50% { opacity: 1; } }
+        @keyframes boot-load { 0% { width: 0%; } 100% { width: 100%; } }
 
+        /* Toasts */
+        #toast-container {
+            position: fixed; top: 20px; right: 20px; z-index: 900;
+            display: flex; flex-direction: column; gap: 10px; pointer-events: none;
+        }
+        .toast {
+            background: rgba(4, 14, 32, 0.9); border: 1px solid var(--jarvis-border);
+            backdrop-filter: blur(12px); padding: 10px 18px; border-radius: 8px;
+            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
+            color: var(--jarvis-cyan); box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+            transform: translateX(120%); transition: transform 0.4s ease, opacity 0.4s ease;
+            opacity: 0; pointer-events: auto; max-width: 320px;
+        }
+        .toast.show { transform: translateX(0); opacity: 1; }
+        .toast.warn { color: #ffb703; border-color: rgba(255,183,3,0.3); }
+        .toast.err { color: #ff4d4d; border-color: rgba(255,77,77,0.3); }
+
+        /* Header */
         header {
-            padding: 18px 30px; 
-            display: flex; justify-content: space-between; align-items: center;
-            border-bottom: 1px solid rgba(0, 240, 255, 0.18);
-            background: rgba(2, 7, 21, 0.85);
-            backdrop-filter: blur(20px);
-            box-shadow: 0 4px 30px rgba(0, 0, 0, 0.6);
-            z-index: 10;
-            position: relative;
+            padding: 16px 28px; display: flex; justify-content: space-between; align-items: center;
+            border-bottom: 1px solid var(--jarvis-border);
+            background: rgba(2, 8, 18, 0.85); backdrop-filter: blur(16px);
         }
-        header::after {
-            content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, var(--glow-ready), transparent);
-            opacity: 0.5;
+        .logo-block h1 {
+            font-family: var(--font-display); font-size: 26px; font-weight: 900;
+            letter-spacing: 10px; color: #fff; text-shadow: 0 0 20px var(--jarvis-glow);
         }
-        
-        .header-title-sec h1 { 
-            margin: 0; font-family: var(--font-display); font-weight: 900; font-size: 28px; 
-            letter-spacing: 8px; text-shadow: 0 0 15px rgba(0, 240, 255, 0.6); color: #fff;
+        .logo-block .sub {
+            font-family: var(--font-display); font-size: 8px; letter-spacing: 4px;
+            color: var(--jarvis-cyan); text-transform: uppercase; margin-top: 4px; opacity: 0.7;
         }
-        .subtitle { 
-            font-family: var(--font-display); font-size: 9px; color: #00f0ff; 
-            margin-top: 5px; letter-spacing: 5px; text-transform: uppercase; font-weight: 700;
-            opacity: 0.75;
-        }
-        .header-status-indicator {
-            display: flex; align-items: center; gap: 12px;
-            font-family: var(--font-display); font-size: 11px; letter-spacing: 2px;
-            background: rgba(0, 240, 255, 0.05); border: 1px solid rgba(0, 240, 255, 0.15);
-            padding: 6px 15px; border-radius: 20px;
+        .status-pill {
+            display: flex; align-items: center; gap: 10px;
+            background: rgba(0, 212, 255, 0.05); border: 1px solid var(--jarvis-border);
+            padding: 6px 16px; border-radius: 20px; font-family: var(--font-display); font-size: 10px; letter-spacing: 2px;
         }
         .status-dot {
-            width: 9px; height: 9px; border-radius: 50%;
-            background-color: var(--glow-ready);
-            box-shadow: 0 0 12px var(--glow-ready);
-            animation: pulse-dot 1.5s infinite;
+            width: 8px; height: 8px; border-radius: 50%; background: var(--jarvis-cyan);
+            box-shadow: 0 0 10px var(--jarvis-cyan); animation: dot-pulse 2s infinite;
         }
+        @keyframes dot-pulse { 0%, 100% { transform: scale(1); opacity: 0.5; } 50% { transform: scale(1.3); opacity: 1; } }
 
-        @keyframes pulse-dot {
-            0%, 100% { transform: scale(1); opacity: 0.6; }
-            50% { transform: scale(1.2); opacity: 1; }
-        }
-
+        /* Main */
         main {
-            flex: 1; display: flex; padding: 20px; gap: 20px;
-            overflow: hidden; position: relative;
+            flex: 1; display: grid; grid-template-columns: 300px 1fr 440px;
+            gap: 16px; padding: 16px; overflow: hidden; position: relative; z-index: 1;
         }
-        
-        /* Sci-Fi Panels with Glassmorphism and targeting corner decorations */
-        .panel {
-            background: var(--panel-bg);
-            border: 1px solid var(--border-neon); border-radius: 16px;
-            padding: 22px; display: flex; flex-direction: column;
-            box-shadow: 0 12px 40px 0 rgba(0, 0, 0, 0.6), inset 0 1px 1px rgba(255, 255, 255, 0.05);
-            backdrop-filter: blur(25px);
-            transition: border-color 0.4s, box-shadow 0.4s;
-            position: relative;
+        .hud-panel {
+            background: var(--jarvis-panel); border: 1px solid var(--jarvis-border);
+            border-radius: 12px; padding: 20px; display: flex; flex-direction: column;
+            backdrop-filter: blur(20px); position: relative; overflow: hidden;
         }
-        .panel::before, .panel::after {
-            content: ''; position: absolute; width: 10px; height: 10px; border-color: var(--glow-ready); border-style: solid; opacity: 0.4; pointer-events: none;
-        }
-        .panel::before { top: -1px; left: -1px; border-width: 2px 0 0 2px; border-top-left-radius: 16px; }
-        .panel::after { bottom: -1px; right: -1px; border-width: 0 2px 2px 0; border-bottom-right-radius: 16px; }
-        
-        .panel:hover {
-            border-color: rgba(0, 240, 255, 0.35);
-            box-shadow: 0 12px 40px 0 rgba(0, 240, 255, 0.04), inset 0 1px 1px rgba(255, 255, 255, 0.08);
-        }
-        .panel:hover::before, .panel:hover::after { opacity: 0.8; }
-        
-        #left-panel { width: 320px; }
-        #center-panel { flex: 1.1; position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        #right-panel { flex: 1.5; overflow: hidden; }
-        
-        .panel-title {
-            font-family: var(--font-display); font-size: 13px; font-weight: 700; color: #00f0ff;
-            border-bottom: 1px solid rgba(0, 240, 255, 0.15); padding-bottom: 10px; margin-bottom: 18px;
-            letter-spacing: 3px; text-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
-            display: flex; justify-content: space-between; align-items: center;
-        }
-        .panel-title::after {
-            content: '// SYS_LOG'; font-size: 8px; opacity: 0.5; font-weight: normal; letter-spacing: 1.5px;
-        }
-        #left-panel .panel-title::after { content: '// HARDWARE'; }
-        #center-panel .panel-title::after { content: '// COGNITION'; }
-        
-        /* Telemetry Styling */
-        .stat-group { margin-bottom: 15px; }
-        .stat-label { font-size: 9px; color: #8ecae6; letter-spacing: 1.5px; text-transform: uppercase; margin-bottom: 5px; display: block; opacity: 0.85; }
-        .stat-row { display: flex; justify-content: space-between; align-items: center; font-size: 13px; font-family: var(--font-display); }
-        .stat-val { color: #fff; font-weight: 600; text-shadow: 0 0 4px rgba(255,255,255,0.2); }
-        
-        /* Telemetry Progress Bar */
-        .progress-container {
-            width: 100%; height: 6px; background: rgba(0, 95, 115, 0.15);
-            border-radius: 3px; margin-top: 6px; overflow: hidden;
-            border: 1px solid rgba(0, 240, 255, 0.08); position: relative;
-        }
-        .progress-bar {
-            height: 100%; width: 0%; background: linear-gradient(90deg, #00bbf9, #00f0ff);
-            border-radius: 3px; transition: width 0.8s cubic-bezier(0.1, 0.8, 0.25, 1);
-            box-shadow: 0 0 8px var(--glow-ready);
-            position: relative; overflow: hidden;
-        }
-        .progress-bar::after {
-            content: ''; position: absolute; top: 0; left: 0; bottom: 0; right: 0;
-            background-image: linear-gradient(-45deg, rgba(255, 255, 255, 0.25) 25%, transparent 25%, transparent 50%, rgba(255, 255, 255, 0.25) 50%, rgba(255, 255, 255, 0.25) 75%, transparent 75%, transparent);
-            background-size: 15px 15px;
-            animation: move-stripes 2s linear infinite;
-        }
-        @keyframes move-stripes {
-            0% { background-position: 0 0; }
-            100% { background-position: 30px 0; }
-        }
-
-        /* Arc Reactor chamber */
-        .arc-container {
-            width: 270px; height: 270px; position: relative;
-            display: flex; align-items: center; justify-content: center;
-            margin-bottom: 25px;
-        }
-        #arc-svg {
-            width: 100%; height: 100%; filter: drop-shadow(0 0 15px rgba(0, 240, 255, 0.2));
-            transition: filter 0.5s;
-        }
-        
-        /* Arc Animation classes with adjustable durations via dynamic status */
-        .ring-spin-cw {
-            transform-origin: center;
-            animation: spin-cw 20s linear infinite;
-            transition: animation-duration 0.5s;
-        }
-        .ring-spin-ccw {
-            transform-origin: center;
-            animation: spin-ccw 14s linear infinite;
-            transition: animation-duration 0.5s;
-        }
-        .ring-spin-ccw-slow {
-            transform-origin: center;
-            animation: spin-ccw 35s linear infinite;
-            transition: animation-duration 0.5s;
-        }
-        .core-tri {
-            transform-origin: center;
-            animation: spin-cw 30s linear infinite;
-            transition: animation-duration 0.5s;
-        }
-        #reactor-core-glow {
-            transform-origin: center;
-            animation: pulse-core 2s ease-in-out infinite;
-            transition: all 0.5s ease;
-        }
-        #reactor-core-white {
-            transform-origin: center;
-            animation: pulse-core 2s ease-in-out infinite;
-            transition: all 0.5s ease;
-        }
-
-        @keyframes spin-cw {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(360deg); }
-        }
-        @keyframes spin-ccw {
-            from { transform: rotate(0deg); }
-            to { transform: rotate(-360deg); }
-        }
-        @keyframes pulse-core {
-            0%, 100% { transform: scale(1); opacity: 0.8; }
-            50% { transform: scale(1.1); opacity: 1; }
-        }
-        
-        #status-display { 
-            text-align: center; font-family: var(--font-display);
-            font-size: 11px; letter-spacing: 4px; font-weight: bold;
-            background: rgba(6, 17, 38, 0.35); border: 1px solid rgba(0, 240, 255, 0.1);
-            padding: 8px 20px; border-radius: 6px;
-        }
-        #status-txt { font-weight: 900; transition: color 0.5s; text-shadow: 0 0 10px currentColor; }
-        
-        /* Activity Stream Chat Styling */
-        #log-area {
-            flex: 1; overflow-y: auto; font-size: 14px; line-height: 1.6;
-            color: #d1e9ff; padding-right: 12px;
-            scroll-behavior: smooth;
-        }
-        #log-area::-webkit-scrollbar { width: 5px; }
-        #log-area::-webkit-scrollbar-thumb { background: rgba(0, 240, 255, 0.15); border-radius: 10px; }
-        #log-area::-webkit-scrollbar-thumb:hover { background: var(--glow-ready); }
-
-        .log-entry { 
-            margin-bottom: 22px; border-left: 3px solid transparent; padding-left: 18px;
-            animation: fadeIn 0.4s cubic-bezier(0.1, 0.8, 0.3, 1);
-            background: rgba(0, 240, 255, 0.015); border-radius: 4px; padding: 12px 16px;
-            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
-        }
-        @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
-        
-        .log-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; border-bottom: 1px dashed rgba(0,240,255,0.06); padding-bottom: 6px; }
-        .log-header-left { display: flex; gap: 10px; align-items: center; }
-        .log-timestamp { font-size: 9.5px; color: #5c7f99; font-family: var(--font-display); letter-spacing: 1px; }
-        .log-sender-name { font-family: var(--font-display); font-weight: 800; font-size: 11px; letter-spacing: 2px; text-transform: uppercase; }
-        .log-sec-badge { font-size: 7.5px; font-family: var(--font-display); padding: 2px 6px; border-radius: 3px; border: 1px solid currentColor; font-weight: bold; opacity: 0.7; }
-        
-        .log-content {
-            color: #ecf8ff; word-wrap: break-word; font-family: var(--font-sans);
-        }
-        .log-content p { margin: 6px 0; }
-        .log-content code {
-            background: rgba(0, 95, 115, 0.2); border: 1px solid rgba(0, 240, 255, 0.25);
-            padding: 2px 6px; border-radius: 4px; font-family: var(--font-mono); font-size: 12.5px; color: #00f0ff;
-        }
-        .log-content pre {
-            background: rgba(4, 9, 23, 0.9) !important;
-            border: 1px solid rgba(0, 240, 255, 0.18); border-radius: 10px;
-            padding: 14px; overflow-x: auto; margin: 12px 0;
-            position: relative; box-shadow: 0 4px 20px rgba(0,0,0,0.5);
-        }
-        .log-content pre code {
-            background: transparent; border: none; padding: 0; color: #fff; font-family: var(--font-mono); font-size: 13px;
-        }
-        
-        /* Copy Code block button */
-        .copy-btn {
-            position: absolute; top: 8px; right: 8px;
-            background: rgba(0, 240, 255, 0.08); border: 1px solid rgba(0, 240, 255, 0.25);
-            color: #00f0ff; padding: 4px 8px; font-size: 9.5px; border-radius: 5px;
-            cursor: pointer; font-family: var(--font-display); letter-spacing: 1.5px; font-weight: 600;
-            transition: all 0.3s;
-        }
-        .copy-btn:hover {
-            background: #00f0ff; color: #020610; box-shadow: 0 0 12px #00f0ff;
-        }
-
-        .log-action .log-content { color: #00f5d4; font-style: italic; font-size: 12px; font-family: var(--font-mono); }
-        
-        /* Input & Controls Footer Console Grid */
-        footer {
-            padding: 20px 30px; display: flex; flex-direction: column; gap: 15px;
-            background: rgba(2, 6, 18, 0.96); border-top: 1px solid rgba(0, 240, 255, 0.18);
-            box-shadow: 0 -5px 30px rgba(0, 0, 0, 0.7); position: relative;
-        }
-        footer::before {
-            content: ''; position: absolute; top: -1px; left: 0; right: 0; height: 1px;
-            background: linear-gradient(90deg, transparent, var(--glow-ready), transparent);
+        .hud-panel::before {
+            content: ''; position: absolute; top: 0; left: 0; right: 0; height: 1px;
+            background: linear-gradient(90deg, transparent, var(--jarvis-cyan), transparent);
             opacity: 0.3;
         }
-        .input-bar { display: flex; gap: 15px; align-items: center; }
-        
-        input {
-            flex: 1; background: rgba(3, 13, 33, 0.6); border: 1px solid rgba(0, 240, 255, 0.25);
-            padding: 15px 25px; color: #fff; font-family: var(--font-sans); border-radius: 30px;
-            outline: none; transition: border-color 0.3s, box-shadow 0.3s; font-size: 14.5px;
-            box-shadow: inset 0 2px 10px rgba(0,0,0,0.6);
+        .panel-label {
+            font-family: var(--font-display); font-size: 10px; letter-spacing: 3px;
+            color: var(--jarvis-cyan); margin-bottom: 16px; padding-bottom: 8px;
+            border-bottom: 1px solid var(--jarvis-border); display: flex; justify-content: space-between;
         }
-        input:focus { 
-            border-color: #00f0ff; 
-            box-shadow: inset 0 2px 10px rgba(0,0,0,0.6), 0 0 15px rgba(0, 240, 255, 0.2); 
+        .panel-label span { opacity: 0.5; font-size: 8px; }
+
+        /* Telemetry */
+        .metric { margin-bottom: 14px; }
+        .metric-header { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; }
+        .metric-name { color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; font-size: 9px; }
+        .metric-val { font-family: var(--font-display); color: #fff; font-size: 12px; }
+        .bar-track {
+            height: 4px; background: rgba(0, 212, 255, 0.08); border-radius: 2px; overflow: hidden;
+            border: 1px solid rgba(0, 212, 255, 0.05);
         }
-        
+        .bar-fill {
+            height: 100%; background: linear-gradient(90deg, var(--jarvis-blue), var(--jarvis-cyan));
+            border-radius: 2px; transition: width 0.6s ease; box-shadow: 0 0 8px rgba(0, 212, 255, 0.3);
+            position: relative;
+        }
+        .bar-fill::after {
+            content: ''; position: absolute; right: 0; top: 0; bottom: 0; width: 10px;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.4));
+        }
+        .net-row { display: flex; justify-content: space-between; font-size: 11px; margin-bottom: 4px; }
+        .net-label { color: var(--text-dim); font-size: 9px; text-transform: uppercase; letter-spacing: 1px; }
+        .net-val { font-family: var(--font-display); }
+        .net-in { color: #00f5d4; }
+        .net-out { color: #00a8ff; }
+        .focus-box {
+            margin-top: 12px; padding: 8px 10px; background: rgba(0, 212, 255, 0.03);
+            border: 1px solid var(--jarvis-border); border-radius: 6px;
+            font-family: var(--font-mono); font-size: 10px; color: var(--text-dim);
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+        }
+
+        /* Center */
+        #center-panel { align-items: center; justify-content: center; position: relative; }
+        .reactor-wrap {
+            width: 300px; height: 300px; position: relative; display: flex; align-items: center; justify-content: center;
+        }
+        .reactor-svg {
+            width: 100%; height: 100%; filter: drop-shadow(0 0 25px rgba(0, 212, 255, 0.3));
+        }
+        .ring-outer { transform-origin: center; animation: spin-cw 25s linear infinite; }
+        .ring-mid { transform-origin: center; animation: spin-ccw 18s linear infinite; }
+        .ring-inner { transform-origin: center; animation: spin-cw 12s linear infinite; }
+        .ring-hex { transform-origin: center; animation: spin-ccw 35s linear infinite; }
+        .core-glow { transform-origin: center; animation: core-pulse 3s ease-in-out infinite; }
+        @keyframes spin-cw { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+        @keyframes spin-ccw { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+        @keyframes core-pulse {
+            0%, 100% { transform: scale(1); opacity: 0.7; }
+            50% { transform: scale(1.15); opacity: 1; }
+        }
+        #audio-viz {
+            position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
+            width: 260px; height: 60px; opacity: 0.8; pointer-events: none;
+        }
+        .status-banner {
+            margin-top: 20px; font-family: var(--font-display); font-size: 10px; letter-spacing: 4px;
+            padding: 8px 24px; border: 1px solid var(--jarvis-border); border-radius: 4px;
+            background: rgba(0, 212, 255, 0.03); color: var(--jarvis-cyan); transition: all 0.4s;
+        }
+        .status-banner.offline { color: #ff4d4d; border-color: rgba(255, 77, 77, 0.3); }
+        .status-banner.thinking { color: #ffb703; border-color: rgba(255, 183, 3, 0.3); }
+        .status-banner.speaking { color: #00a8ff; border-color: rgba(0, 168, 255, 0.3); }
+        .status-banner.listening { color: #00f5d4; border-color: rgba(0, 245, 212, 0.3); }
+
+        /* Chat */
+        #log-area {
+            flex: 1; overflow-y: auto; font-size: 13px; line-height: 1.6;
+            padding-right: 8px; scroll-behavior: smooth;
+        }
+        #log-area::-webkit-scrollbar { width: 4px; }
+        #log-area::-webkit-scrollbar-thumb { background: rgba(0, 212, 255, 0.2); border-radius: 4px; }
+        .msg {
+            margin-bottom: 16px; padding: 12px 14px; border-radius: 8px;
+            background: rgba(0, 212, 255, 0.02); border-left: 2px solid transparent;
+            animation: msg-in 0.3s ease; position: relative;
+        }
+        @keyframes msg-in { from { opacity: 0; transform: translateX(10px); } to { opacity: 1; transform: translateX(0); } }
+        .msg-header { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 10px; }
+        .msg-sender { font-family: var(--font-display); font-weight: 700; letter-spacing: 2px; text-transform: uppercase; }
+        .msg-time { color: var(--text-dim); font-family: var(--font-display); letter-spacing: 1px; }
+        .msg-body { color: var(--text-primary); word-wrap: break-word; }
+        .msg-body p { margin: 4px 0; }
+        .msg-body code {
+            background: rgba(0, 212, 255, 0.1); border: 1px solid rgba(0, 212, 255, 0.2);
+            padding: 2px 5px; border-radius: 3px; font-family: var(--font-mono); font-size: 12px; color: var(--jarvis-cyan);
+        }
+        .msg-body pre {
+            background: rgba(2, 8, 18, 0.9); border: 1px solid var(--jarvis-border);
+            border-radius: 8px; padding: 12px; overflow-x: auto; margin: 8px 0; position: relative;
+        }
+        .msg-body pre code { background: none; border: none; padding: 0; color: #fff; }
+        .copy-btn {
+            position: absolute; top: 6px; right: 6px; background: rgba(0, 212, 255, 0.1);
+            border: 1px solid rgba(0, 212, 255, 0.3); color: var(--jarvis-cyan); padding: 3px 8px;
+            font-size: 9px; border-radius: 4px; cursor: pointer; font-family: var(--font-display); letter-spacing: 1px;
+        }
+        .copy-btn:hover { background: var(--jarvis-cyan); color: var(--jarvis-dark); }
+        .msg-user { border-left-color: rgba(255, 183, 3, 0.5); }
+        .msg-user .msg-sender { color: #ffb703; }
+        .msg-jarvis { border-left-color: var(--jarvis-cyan); }
+        .msg-jarvis .msg-sender { color: var(--jarvis-cyan); }
+        .msg-system { border-left-color: rgba(255, 77, 77, 0.4); }
+        .msg-system .msg-sender { color: #ff4d4d; }
+        .msg-action { border-left-color: rgba(0, 245, 212, 0.4); font-style: italic; }
+        .msg-action .msg-sender { color: #00f5d4; }
+        .msg-action .msg-body { color: #00f5d4; font-family: var(--font-mono); font-size: 11px; }
+
+        /* Footer */
+        footer {
+            padding: 14px 24px; background: rgba(2, 8, 18, 0.95);
+            border-top: 1px solid var(--jarvis-border); display: flex; flex-direction: column; gap: 12px;
+            position: relative; z-index: 2;
+        }
+        .input-row { display: flex; gap: 12px; align-items: center; }
+        #cmd-input {
+            flex: 1; background: rgba(4, 14, 32, 0.6); border: 1px solid rgba(0, 212, 255, 0.25);
+            padding: 14px 22px; color: #fff; font-family: var(--font-body); font-size: 14px;
+            border-radius: 24px; outline: none; transition: all 0.3s;
+            box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
+        }
+        #cmd-input:focus {
+            border-color: var(--jarvis-cyan);
+            box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), 0 0 15px rgba(0, 212, 255, 0.15);
+        }
         .exec-btn {
-            background: rgba(0, 240, 255, 0.08); border: 1px solid #00f0ff; color: #00f0ff;
-            padding: 13px 35px; font-family: var(--font-display); cursor: pointer; border-radius: 25px;
-            transition: all 0.4s cubic-bezier(0.1, 0.8, 0.25, 1); letter-spacing: 4px; font-weight: 700; font-size: 12px;
-            text-shadow: 0 0 8px rgba(0, 240, 255, 0.4);
+            background: rgba(0, 212, 255, 0.1); border: 1px solid var(--jarvis-cyan);
+            color: var(--jarvis-cyan); padding: 12px 28px; font-family: var(--font-display);
+            font-size: 11px; letter-spacing: 3px; font-weight: 700; border-radius: 24px;
+            cursor: pointer; transition: all 0.3s; text-shadow: 0 0 8px rgba(0, 212, 255, 0.3);
         }
-        .exec-btn:hover { 
-            background: #00f0ff; color: #020610; 
-            box-shadow: 0 0 25px #00f0ff; transform: scale(1.02);
+        .exec-btn:hover {
+            background: var(--jarvis-cyan); color: var(--jarvis-dark);
+            box-shadow: 0 0 25px rgba(0, 212, 255, 0.4);
         }
-        
-        /* Widget Control Row */
-        .footer-control-panel {
-            display: flex; gap: 20px; align-items: center; justify-content: flex-start;
-            flex-wrap: wrap; border-top: 1px dashed rgba(0, 240, 255, 0.08); padding-top: 14px;
+        .controls-row {
+            display: flex; gap: 14px; align-items: center; flex-wrap: wrap;
+            border-top: 1px dashed var(--jarvis-border); padding-top: 12px;
         }
-        .control-widget {
-            display: flex; align-items: center; gap: 12px;
-            background: rgba(6, 15, 38, 0.5); border: 1px solid rgba(0, 240, 255, 0.15);
-            padding: 6px 16px; border-radius: 20px;
+        .ctrl-group {
+            display: flex; align-items: center; gap: 10px;
+            background: rgba(0, 212, 255, 0.04); border: 1px solid var(--jarvis-border);
+            padding: 5px 14px; border-radius: 16px;
         }
-        .control-widget label {
-            font-family: var(--font-display); font-size: 9px; color: #8ecae6; letter-spacing: 1.5px;
+        .ctrl-label {
+            font-family: var(--font-display); font-size: 8px; color: var(--text-dim);
+            letter-spacing: 1.5px; text-transform: uppercase;
         }
-        .control-widget select {
-            background: #030a1c; color: #fff; border: 1px solid rgba(0, 240, 255, 0.25);
-            border-radius: 5px; padding: 4px 10px; outline: none; font-size: 11px;
-            font-family: var(--font-display); cursor: pointer; transition: border-color 0.3s;
+        select {
+            background: rgba(2, 8, 18, 0.8); color: #fff; border: 1px solid rgba(0, 212, 255, 0.25);
+            border-radius: 4px; padding: 4px 8px; font-size: 10px; font-family: var(--font-display);
+            outline: none; cursor: pointer;
         }
-        .control-widget select:focus {
-            border-color: #00f0ff;
-        }
-        
-        /* Toggle Styling */
-        .toggle-container { display: flex; align-items: center; }
-        .toggle-label { font-family: var(--font-display); font-size: 9px; color: #5c7f99; }
-        .switch {
-            position: relative; display: inline-block; width: 36px; height: 18px; margin: 0 8px;
-        }
-        .switch input { opacity: 0; width: 0; height: 0; }
-        .slider {
-            position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
-            background-color: rgba(0, 95, 115, 0.15); border: 1px solid rgba(0, 240, 255, 0.2);
-            transition: .4s; border-radius: 20px;
-        }
-        .slider:before {
-            position: absolute; content: ""; height: 12px; width: 12px; left: 2px; bottom: 2px;
-            background-color: #5c7f99; transition: .4s; border-radius: 50%;
-        }
-        input:checked + .slider { background-color: rgba(0, 240, 255, 0.15); border-color: #00f0ff; }
-        input:checked + .slider:before {
-            transform: translateX(18px); background-color: #00f0ff; box-shadow: 0 0 8px #00f0ff;
-        }
-        
-        /* Glowing Sci-Fi Buttons styling */
         .hud-btn {
-            background: rgba(6, 15, 38, 0.5); border: 1px solid rgba(0, 240, 255, 0.18);
-            color: #d1e9ff; padding: 7px 16px; border-radius: 20px; cursor: pointer;
-            font-family: var(--font-display); font-size: 10px; letter-spacing: 1.5px;
-            display: flex; align-items: center; gap: 8px; transition: all 0.3s;
+            background: rgba(0, 212, 255, 0.05); border: 1px solid var(--jarvis-border);
+            color: var(--text-dim); padding: 6px 14px; border-radius: 16px; cursor: pointer;
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 1.5px;
+            display: flex; align-items: center; gap: 6px; transition: all 0.3s;
         }
         .hud-btn:hover:not(:disabled) {
-            border-color: #00f0ff; color: #fff; background: rgba(0, 240, 255, 0.05);
-            box-shadow: 0 0 10px rgba(0, 240, 255, 0.1);
+            border-color: var(--jarvis-cyan); color: #fff; background: rgba(0, 212, 255, 0.08);
         }
-        
-        .mic-btn-ready { border-color: rgba(0, 245, 212, 0.3); color: #00f5d4; }
-        .mic-btn-ready:hover { background: rgba(0, 245, 212, 0.08); border-color: #00f5d4; }
-        .mic-btn-active { 
-            background: rgba(0, 245, 212, 0.15) !important; border-color: #00f5d4 !important; 
-            color: #fff !important; box-shadow: 0 0 15px rgba(0, 245, 212, 0.35);
-            animation: pulse-mic 1s infinite alternate;
+        .hud-btn:disabled { opacity: 0.3; cursor: not-allowed; }
+        .mic-btn-inactive { opacity: 0.4; }
+        .mic-active {
+            background: rgba(0, 245, 212, 0.15) !important; border-color: #00f5d4 !important;
+            color: #fff !important; animation: mic-pulse 1s infinite alternate;
         }
-        .mic-btn-inactive { opacity: 0.3; cursor: not-allowed; }
- 
-        @keyframes pulse-mic {
-            from { box-shadow: 0 0 8px rgba(0, 245, 212, 0.2); }
-            to { box-shadow: 0 0 18px rgba(0, 245, 212, 0.5); }
+        @keyframes mic-pulse {
+            from { box-shadow: 0 0 5px rgba(0, 245, 212, 0.2); }
+            to { box-shadow: 0 0 15px rgba(0, 245, 212, 0.5); }
         }
- 
-        .glow-cyan { border-color: rgba(0, 240, 255, 0.3); color: #00f0ff; }
-        .glow-cyan:hover { background: rgba(0, 240, 255, 0.08); border-color: #00f0ff; }
-        .glow-red { border-color: rgba(255, 77, 77, 0.3); color: #ff4d4d; }
-        .glow-red:hover { background: rgba(255, 77, 77, 0.08); border-color: #ff4d4d; }
-        .glow-yellow { border-color: rgba(255, 183, 3, 0.3); color: #ffb703; }
-        .glow-yellow:hover { background: rgba(255, 183, 3, 0.08); border-color: #ffb703; }
+        .badge {
+            font-size: 8px; padding: 2px 6px; border-radius: 3px; font-family: var(--font-display);
+            letter-spacing: 1px; margin-left: 4px;
+        }
+        .badge-fallback { background: rgba(255, 183, 3, 0.15); color: #ffb703; border: 1px solid rgba(255, 183, 3, 0.3); }
     </style>
-    
-    <script type="text/javascript" src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" async></script>
+...
     <script>
-        var pyBridgeInstance = null;
-        var activeJarvisElement = null;
-        var activeJarvisText = "";
-        var micActive = false;
- 
-        // Custom Markdown renderer configuration
-        if (typeof marked !== 'undefined') {
-            marked.setOptions({
-                gfm: true,
-                breaks: true
-            });
+        let bridge = null;
+        let activeJarvisMsg = null;
+        let jarvisBuffer = "";
+        let micOn = false;
+        let cmdHistory = [];
+        let cmdIndex = -1;
+        let userScrolled = false;
+
+        if (typeof marked !== 'undefined') marked.setOptions({ gfm: true, breaks: true });
+        function md(text) {
+            if (typeof marked === 'undefined') return text;
+            return DOMPurify.sanitize(marked.parse(text));
         }
- 
-        function renderMarkdown(text) {
-            if (typeof marked !== 'undefined') {
-                try {
-                    return marked.parse(text);
-                } catch (e) {
-                    return text;
-                }
-            }
-            return text;
-        }
- 
-        function escapeHTML(text) {
-            return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-        }
- 
-        function addCopyButton(codeBlock) {
-            const pre = codeBlock.parentNode;
+        function esc(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+        function addCopyBtn(block) {
+            const pre = block.parentNode;
             if (pre && pre.tagName === 'PRE' && !pre.querySelector('.copy-btn')) {
                 pre.style.position = 'relative';
                 const btn = document.createElement('button');
-                btn.className = 'copy-btn';
-                btn.innerText = 'COPY';
-                btn.onclick = function() {
-                    const text = codeBlock.innerText;
-                    navigator.clipboard.writeText(text).then(() => {
-                        btn.innerText = 'COPIED!';
-                        setTimeout(() => btn.innerText = 'COPY', 2000);
-                    });
-                };
+                btn.className = 'copy-btn'; btn.innerText = 'COPY';
+                btn.onclick = () => navigator.clipboard.writeText(block.innerText).then(() => {
+                    btn.innerText = 'COPIED!'; setTimeout(() => btn.innerText = 'COPY', 1500);
+                });
                 pre.appendChild(btn);
             }
         }
- 
-        // Stats receiver from WebChannel signal
-        function updateStats(cpu, mem, disk, netIn, netOut, activeWin) {
-            document.getElementById('cpu-val').innerText = cpu + '%';
-            document.getElementById('cpu-bar').style.width = cpu + '%';
-            
-            document.getElementById('mem-val').innerText = mem + '%';
-            document.getElementById('mem-bar').style.width = mem + '%';
-            
-            document.getElementById('disk-val').innerText = disk + '%';
-            document.getElementById('disk-bar').style.width = disk + '%';
-            
-            document.getElementById('net-in-val').innerText = netIn;
-            document.getElementById('net-out-val').innerText = netOut;
-            document.getElementById('focus-win-val').innerText = activeWin;
+        function setBootDone() {
+            setTimeout(() => document.getElementById('boot-overlay').classList.add('fade-out'), 600);
         }
-        
-        // Status setting - manipulates Arc Reactor beautifully based on states
+        function formatTokens(n) {
+            if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
+            if (n >= 1000) return (n / 1000).toFixed(1) + 'K';
+            return n.toString();
+        }
+        function formatBytes(n) {
+            if (n >= 1048576) return (n / 1048576).toFixed(1) + ' MB';
+            if (n >= 1024) return (n / 1024).toFixed(1) + ' KB';
+            return n + ' B';
+        }
+        function updateStats(cpu, mem, disk, netIn, netOut, win) {
+            document.getElementById('cpu-bar').style.width = Math.min(100, cpu) + '%';
+            document.getElementById('cpu-txt').innerText = cpu + '%';
+            let memPct = Math.min(100, Math.round(mem / 100000 * 100));
+            document.getElementById('mem-bar').style.width = memPct + '%';
+            document.getElementById('mem-txt').innerText = formatTokens(mem) + ' tokens';
+            let diskPct = Math.min(100, Math.round(disk / 200000 * 100));
+            document.getElementById('disk-bar').style.width = diskPct + '%';
+            document.getElementById('disk-txt').innerText = formatBytes(disk);
+            document.getElementById('net-in').innerText = netIn;
+            document.getElementById('net-out').innerText = netOut;
+            document.getElementById('focus-win').innerText = win;
+        }
         function setStatus(status) {
-            const glow = document.getElementById('reactor-core-glow');
-            const stop2 = document.querySelector('#core-glow stop:nth-child(2)');
-            const stop3 = document.querySelector('#core-glow stop:nth-child(3)');
-            const statusTxt = document.getElementById('status-txt');
-            const dot = document.getElementById('header-status-dot');
-            const label = document.getElementById('header-status-label');
-            const svg = document.getElementById('arc-svg');
- 
-            const ring1 = document.querySelector('.ring-spin-cw');
-            const ring2 = document.querySelector('.ring-spin-ccw');
-            const ring3 = document.querySelector('.ring-spin-ccw-slow');
-            const triangle = document.querySelector('.core-tri');
-            
-            statusTxt.innerText = status;
-            if(label) label.innerText = status;
-            
-            let color = 'var(--glow-ready)';
-            let pulseSpeed = '2s';
-            let r1Speed = '20s';
-            let r2Speed = '14s';
-            let r3Speed = '35s';
-            let triSpeed = '30s';
-            
-            if(status === "THINKING") {
-                color = 'var(--glow-thinking)';
-                pulseSpeed = '0.5s';
-                r1Speed = '4s';
-                r2Speed = '3s';
-                r3Speed = '8s';
-                triSpeed = '6s';
-            } else if(status === "READY") {
-                color = 'var(--glow-ready)';
-                pulseSpeed = '2s';
-                r1Speed = '20s';
-                r2Speed = '14s';
-                r3Speed = '35s';
-                triSpeed = '30s';
-            } else if(status === "LISTENING") {
-                color = 'var(--glow-listening)';
-                pulseSpeed = '1s';
-                r1Speed = '12s';
-                r2Speed = '8s';
-                r3Speed = '20s';
-                triSpeed = '15s';
-            } else if(status === "SPEAKING") {
-                color = 'var(--glow-speaking)';
-                pulseSpeed = '0.4s';
-                r1Speed = '8s';
-                r2Speed = '5s';
-                r3Speed = '12s';
-                triSpeed = '10s';
-            } else if(status === "OFFLINE" || status === "RE-LINKING") {
-                color = 'var(--glow-lost)';
-                pulseSpeed = '3.5s';
-                r1Speed = '45s';
-                r2Speed = '35s';
-                r3Speed = '70s';
-                triSpeed = '0s'; // Stop triangle when offline
+            const banner = document.getElementById('center-status');
+            const dot = document.getElementById('header-dot');
+            const label = document.getElementById('header-label');
+            const core = document.getElementById('reactor-core');
+            const rings = document.querySelectorAll('.reactor-svg circle[class^="ring-"]');
+            banner.innerText = 'CORE STATUS: ' + status;
+            label.innerText = status;
+            let color = '#00d4ff'; let speed = '25s';
+            banner.className = 'status-banner';
+            if (status === 'THINKING') { color = '#ffb703'; speed = '3s'; banner.className = 'status-banner thinking'; }
+            else if (status === 'LISTENING') { color = '#00f5d4'; speed = '8s'; banner.className = 'status-banner listening'; }
+            else if (status === 'SPEAKING') { color = '#00a8ff'; speed = '5s'; banner.className = 'status-banner speaking'; }
+            else if (status === 'OFFLINE' || status === 'RECONNECTING' || status === 'CONNECTING') {
+                color = '#ff4d4d'; speed = '60s'; banner.className = 'status-banner offline';
             }
-            
-            // Set styles
-            statusTxt.style.color = color;
-            if(dot) {
-                dot.style.backgroundColor = color;
-                dot.style.boxShadow = '0 0 12px ' + color;
-            }
-            if(stop2) stop2.setAttribute('stop-color', color);
-            if(stop3) stop3.setAttribute('stop-color', color);
-            if(glow) glow.style.animationDuration = pulseSpeed;
- 
-            // Set rotation speeds
-            if(ring1) ring1.style.animationDuration = r1Speed;
-            if(ring2) ring2.style.animationDuration = r2Speed;
-            if(ring3) ring3.style.animationDuration = r3Speed;
-            if(triangle) triangle.style.animationDuration = triSpeed;
- 
-            if(svg) {
-                svg.style.filter = 'drop-shadow(0 0 15px ' + color + '40)';
-            }
+            dot.style.background = color; dot.style.boxShadow = '0 0 10px ' + color;
+            if (core) { core.style.fill = color; core.style.filter = 'drop-shadow(0 0 15px ' + color + ')'; }
+            const rgb = color.startsWith('#') ? [
+                parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)
+            ] : [0,212,255];
+            rings.forEach(r => r.style.stroke = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.3)`);
+            rings.forEach(r => r.style.animationDuration = speed);
         }
-        
-        // Signal Logger
-        function appendLog(sender, text) {
+        function showToast(msg, type='info') {
+            const c = document.getElementById('toast-container');
+            const t = document.createElement('div');
+            t.className = 'toast ' + type; t.innerText = msg;
+            c.appendChild(t);
+            requestAnimationFrame(() => t.classList.add('show'));
+            setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 400); }, 4000);
+        }
+        function appendLog(sender, text, stream=false) {
             const area = document.getElementById('log-area');
-            if(!area) return;
-            
-            if (sender === 'JARVIS' && activeJarvisElement) {
-                activeJarvisText += text;
-                activeJarvisElement.querySelector('.log-content').innerHTML = renderMarkdown(activeJarvisText);
-                
-                // Highlight Code Blocks
-                if (typeof hljs !== 'undefined') {
-                    activeJarvisElement.querySelectorAll('pre code').forEach((block) => {
-                        if (!block.dataset.highlighted) {
-                            hljs.highlightElement(block);
-                            block.dataset.highlighted = "true";
-                            addCopyButton(block);
-                        }
-                    });
-                }
-                area.scrollTop = area.scrollHeight;
+            if (!area) return;
+            if (sender === 'JARVIS' && activeJarvisMsg && stream) {
+                jarvisBuffer += text;
+                activeJarvisMsg.querySelector('.msg-body').innerHTML = md(jarvisBuffer);
+                activeJarvisMsg.querySelectorAll('pre code').forEach(b => {
+                    if (!b.dataset.hl) { hljs.highlightElement(b); b.dataset.hl = '1'; addCopyBtn(b); }
+                });
+                if (!userScrolled) area.scrollTop = area.scrollHeight;
                 return;
             }
-            
-            var entry = document.createElement('div');
-            entry.className = 'log-entry';
-            
-            var now = new Date();
-            var timeStr = now.toTimeString().split(' ')[0];
-            var timeSpan = '<span class="log-timestamp">[' + timeStr + ']</span>';
-            
-            let senderName = "";
-            let colorGlow = "";
-            let secBadge = "";
-            
-            if (sender === 'YOU') {
-                senderName = "OPERATOR";
-                colorGlow = "var(--glow-thinking)";
-                secBadge = "CMD";
-                activeJarvisElement = null; 
-                activeJarvisText = "";
-            } else if (sender === 'JARVIS') {
-                senderName = "JARVIS";
-                colorGlow = "var(--glow-ready)";
-                secBadge = "COGNITIVE_OUT";
-                activeJarvisElement = entry;
-                activeJarvisText = text;
-            } else if (sender === 'ACTION') {
-                senderName = "SYS PROCESS";
-                colorGlow = "var(--glow-listening)";
-                secBadge = "TELEMETRY";
-                activeJarvisElement = null;
-                activeJarvisText = "";
+            const div = document.createElement('div');
+            const t = new Date().toTimeString().split(' ')[0];
+            let cls = 'msg'; let sname = ''; let scolor = '';
+            if (sender === 'YOU') { cls += ' msg-user'; sname = 'OPERATOR'; scolor = '#ffb703'; activeJarvisMsg = null; jarvisBuffer = ''; }
+            else if (sender === 'JARVIS') { cls += ' msg-jarvis'; sname = 'J.A.R.V.I.S.'; scolor = '#00d4ff'; }
+            else if (sender === 'SYSTEM') { cls += ' msg-system'; sname = 'SYSTEM'; scolor = '#ff4d4d'; activeJarvisMsg = null; jarvisBuffer = ''; }
+            else { cls += ' msg-action'; sname = 'SYSTEM'; scolor = '#00f5d4'; activeJarvisMsg = null; jarvisBuffer = ''; }
+            div.className = cls;
+            const bodyHtml = sender === 'JARVIS' ? md(text) : (sender === 'ACTION' ? '>> ' + esc(text) : esc(text));
+            div.innerHTML = `<div class="msg-header"><span class="msg-sender" style="color:${scolor}">${sname}</span><span class="msg-time">${t}</span></div><div class="msg-body">${bodyHtml}</div>`;
+            if (sender === 'JARVIS') {
+                activeJarvisMsg = div; jarvisBuffer = text;
+                div.querySelectorAll('pre code').forEach(b => { hljs.highlightElement(b); b.dataset.hl = '1'; addCopyBtn(b); });
             }
-            
-            entry.innerHTML = `
-                <div class="log-header">
-                    <div class="log-header-left">
-                        ${timeSpan}
-                        <span class="log-sender-name" style="color: ${colorGlow}">${senderName}</span>
-                    </div>
-                    <span class="log-sec-badge" style="color: ${colorGlow}">${secBadge}</span>
-                </div>
-                <div class="log-content">
-                    ${sender === 'JARVIS' ? renderMarkdown(text) : (sender === 'ACTION' ? '>> ' + text : escapeHTML(text))}
-                </div>
-            `;
-            
-            entry.style.borderLeft = '3px solid ' + colorGlow;
-            
-            if (sender === 'JARVIS' && typeof hljs !== 'undefined') {
-                entry.querySelectorAll('pre code').forEach((block) => {
-                    hljs.highlightElement(block);
-                    block.dataset.highlighted = "true";
-                    addCopyButton(block);
-                });
-            }
-            
-            area.appendChild(entry);
-            area.scrollTop = area.scrollHeight;
+            area.appendChild(div);
+            if (!userScrolled) area.scrollTop = area.scrollHeight;
         }
-        
-        // Command Submit
         function sendCmd() {
-            const input = document.getElementById('cmd-input');
-            const val = input.value.trim();
-            if(!val) return;
-            appendLog('YOU', val);
-            input.value = '';
-            setStatus('THINKING');
-            
-            if(pyBridgeInstance) {
-                pyBridgeInstance.submitCommand(val);
-            }
+            const inp = document.getElementById('cmd-input');
+            const v = inp.value.trim(); if (!v) return;
+            cmdHistory.push(v); cmdIndex = cmdHistory.length;
+            appendLog('YOU', v); inp.value = ''; setStatus('THINKING');
+            if (bridge) bridge.submitCommand(v);
         }
- 
-        // Bridge Callbacks
-        function changeModel(model) {
-            if(pyBridgeInstance) {
-                pyBridgeInstance.changeModel(model);
-                appendLog('ACTION', 'Transitioning neural path to: ' + model + '...');
-                setStatus('RE-LINKING');
-            }
+        function changeModel(m) {
+            if (bridge) { bridge.changeModel(m); appendLog('ACTION', 'Rerouting neural path to ' + m + '...'); setStatus('RECONNECTING'); }
         }
- 
-        function toggleVoice(enabled) {
-            const micBtn = document.getElementById('mic-btn');
-            if(pyBridgeInstance) {
-                pyBridgeInstance.setVoiceModeEnabled(enabled.toString());
-                appendLog('ACTION', 'Core vocalizer matrix set to: ' + (enabled ? 'ENABLED' : 'DISABLED') + '.');
-            }
-            if(enabled) {
-                micBtn.disabled = false;
-                micBtn.classList.remove('mic-btn-inactive');
-                micBtn.classList.add('mic-btn-ready');
+        function toggleVoice(on) {
+            const btn = document.getElementById('mic-btn');
+            if (bridge) bridge.setVoiceModeEnabled(on.toString());
+            if (on) {
+                btn.disabled = false; btn.classList.remove('mic-btn-inactive');
+                appendLog('ACTION', 'Voice synthesis enabled.'); setStatus('READY');
             } else {
-                if(micActive) {
-                    toggleMic();
-                }
-                micBtn.disabled = true;
-                micBtn.classList.remove('mic-btn-ready');
-                micBtn.classList.add('mic-btn-inactive');
+                if (micOn) toggleMic();
+                btn.disabled = true; btn.classList.add('mic-btn-inactive');
+                appendLog('ACTION', 'Voice synthesis disabled.'); setStatus('READY');
             }
         }
- 
         function toggleMic() {
-            micActive = !micActive;
-            const micBtn = document.getElementById('mic-btn');
-            const span = micBtn.querySelector('span');
-            
-            if(pyBridgeInstance) {
-                pyBridgeInstance.setMicActive(micActive);
-            }
-            
-            if(micActive) {
-                micBtn.classList.add('mic-btn-active');
-                span.innerText = "MIC ACTIVE";
-                setStatus('LISTENING');
-                appendLog('ACTION', 'Local vocal capture stream initialized.');
-            } else {
-                micBtn.classList.remove('mic-btn-active');
-                span.innerText = "MIC OFF";
-                setStatus('READY');
-                appendLog('ACTION', 'Local vocal capture stream terminated.');
-            }
+            micOn = !micOn; const btn = document.getElementById('mic-btn'); const sp = btn.querySelector('span');
+            if (bridge) bridge.setMicActive(micOn);
+            if (micOn) { btn.classList.add('mic-active'); sp.innerText = 'LISTENING'; setStatus('LISTENING'); appendLog('ACTION', 'Audio capture active.'); }
+            else { btn.classList.remove('mic-active'); sp.innerText = 'MIC'; setStatus('READY'); appendLog('ACTION', 'Audio capture terminated.'); }
         }
- 
         function reconnectCore() {
-            if(pyBridgeInstance) {
-                pyBridgeInstance.triggerReconnect();
-                appendLog('ACTION', 'Re-synchronizing local telemetry handshake...');
-                setStatus('RE-LINKING');
+            if (bridge) { bridge.triggerReconnect(); appendLog('ACTION', 'Re-establishing neural link...'); setStatus('RECONNECTING'); }
+        }
+        function resetCore() {
+            if (bridge) { bridge.resetSession(); appendLog('ACTION', 'Neural matrix reset initiated.'); setStatus('RECONNECTING'); }
+        }
+        function clearLog() { document.getElementById('log-area').innerHTML = ''; appendLog('ACTION', 'Log buffer purged.'); }
+        function updateModelBadge(model, isFallback) {
+            const sel = document.getElementById('model-select');
+            const badge = document.getElementById('model-badge');
+            if (sel) sel.value = model;
+            if (badge) { badge.innerText = isFallback ? 'FALLBACK' : ''; badge.style.display = isFallback ? 'inline-block' : 'none'; }
+        }
+        function updateAudioLevel(level) {
+            const canvas = document.getElementById('audio-viz');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
+            const w = canvas.width, h = canvas.height;
+            ctx.clearRect(0, 0, w, h);
+            const bars = 30; const gap = 2; const barW = (w - (bars - 1) * gap) / bars;
+            for (let i = 0; i < bars; i++) {
+                const decay = Math.abs(Math.sin(Date.now() / 200 + i)) * 0.5 + 0.5;
+                const height = Math.min(h, level * h * decay * 1.5);
+                const x = i * (barW + gap);
+                const y = h - height;
+                const grad = ctx.createLinearGradient(0, y, 0, h);
+                grad.addColorStop(0, 'rgba(0,212,255,0.9)');
+                grad.addColorStop(1, 'rgba(0,212,255,0.1)');
+                ctx.fillStyle = grad;
+                ctx.fillRect(x, y, barW, height);
             }
         }
 
-        function resetCore() {
-            if(pyBridgeInstance) {
-                pyBridgeInstance.resetSession();
-                appendLog('ACTION', 'Neural matrix reset sequence triggered...');
-                setStatus('RE-LINKING');
+        // Keyboard shortcuts
+        document.addEventListener('keydown', (e) => {
+            const inp = document.getElementById('cmd-input');
+            if (document.activeElement === inp) {
+                if (e.key === 'Enter') { e.preventDefault(); sendCmd(); }
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (cmdIndex > 0) { cmdIndex--; inp.value = cmdHistory[cmdIndex]; }
+                }
+                if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (cmdIndex < cmdHistory.length - 1) { cmdIndex++; inp.value = cmdHistory[cmdIndex]; }
+                    else { cmdIndex = cmdHistory.length; inp.value = ''; }
+                }
+                if (e.key === 'Escape') { inp.value = ''; }
             }
-        }
- 
-        function clearConsole() {
-            document.getElementById('log-area').innerHTML = "";
-            appendLog('ACTION', 'Dialog stream purge complete.');
-        }
-        
-        window.onload = function() {
-            if (typeof qt !== "undefined") {
-                new QWebChannel(qt.webChannelTransport, function(channel) {
-                    pyBridgeInstance = channel.objects.pyBridge;
-                    
-                    // Connect WebChannel PyQt Signals to JS handlers
-                    pyBridgeInstance.logReceived.connect(function(sender, text) {
-                        appendLog(sender, text);
-                    });
-                    pyBridgeInstance.statusUpdated.connect(function(status) {
-                        setStatus(status);
-                    });
-                    pyBridgeInstance.telemetryUpdated.connect(function(cpu, mem, disk, netIn, netOut, activeWin) {
-                        updateStats(cpu, mem, disk, netIn, netOut, activeWin);
-                    });
-                    
-                    setStatus('READY');
-                    pyBridgeInstance.onBridgeReady();
-                });
-            }
-        }
+        });
+
+        // Scroll detection
+        document.getElementById('log-area').addEventListener('scroll', (e) => {
+            const el = e.target;
+            userScrolled = el.scrollHeight - el.scrollTop - el.clientHeight > 50;
+        });
+
+        // Boot safety: always dismiss overlay after 3 seconds no matter what
+document.addEventListener('DOMContentLoaded', function() {
+    setTimeout(setBootDone, 3000);
+    initBridge();
+});
+
+function initBridge() {
+    if (typeof qt === "undefined" || !qt.webChannelTransport) {
+        setTimeout(initBridge, 150);
+        return;
+    }
+    new QWebChannel(qt.webChannelTransport, function(ch) {
+        bridge = ch.objects.pyBridge;
+        bridge.logReceived.connect((s, t) => appendLog(s, t, s==='JARVIS'));
+        bridge.statusUpdated.connect((s) => setStatus(s));
+        bridge.telemetryUpdated.connect((c, m, d, ni, no, w) => updateStats(c, m, d, ni, no, w));
+        bridge.modelSwitched.connect((m, f) => updateModelBadge(m, f));
+        bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
+        bridge.toastReceived.connect((m, t) => showToast(m, t));
+        setStatus('READY');
+        setBootDone();
+        bridge.onBridgeReady();
+    });
+}
     </script>
 </head>
 <body>
+    <div id="boot-overlay">
+        <div class="boot-logo">J.A.R.V.I.S.</div>
+        <div class="boot-sub">INITIALIZING NEURAL MATRIX // MARK XLV</div>
+        <div class="boot-bar"><div class="boot-bar-inner"></div></div>
+    </div>
+    <div id="toast-container"></div>
     <header>
-        <div class="header-title-sec">
+        <div class="logo-block">
             <h1>J.A.R.V.I.S.</h1>
-            <div class="subtitle">INTELLIGENCE MATRIX SYSTEMS // MARK XL</div>
+            <div class="sub">Just A Rather Very Intelligent System // Mark XLV</div>
         </div>
-        <div class="header-status-indicator">
-            <div class="status-dot" id="header-status-dot"></div>
-            <span>MATRIX CORE: <span id="header-status-label" style="font-weight:bold;">INIT</span></span>
+        <div class="status-pill">
+            <div class="status-dot" id="header-dot"></div>
+            <span>CORE: <span id="header-label">INIT</span></span>
         </div>
     </header>
- 
     <main>
-        <div class="panel" id="left-panel">
-            <div class="panel-title">SYSTEM TELEMETRY</div>
-            
-            <div class="stat-group">
-                <span class="stat-label">MATRIX INTEGRITY</span>
-                <div class="stat-row"><span>CORE STATUS</span><span class="stat-val" style="color:#00f5d4; text-shadow: 0 0 5px rgba(0, 245, 212, 0.4);">ACTIVE</span></div>
+        <div class="hud-panel" id="left-panel">
+            <div class="panel-label">SYSTEM TELEMETRY <span>// LIVE</span></div>
+            <div class="metric">
+                <div class="metric-header"><span class="metric-name">Neural Load</span><span class="metric-val" id="cpu-txt">--%</span></div>
+                <div class="bar-track"><div class="bar-fill" id="cpu-bar" style="width:0%"></div></div>
             </div>
-            
-            <div class="stat-group">
-                <span class="stat-label">COGNITIVE LOAD</span>
-                <div class="stat-row"><span>NEURAL CORE</span><span id="cpu-val" class="stat-val">--%</span></div>
-                <div class="progress-container"><div id="cpu-bar" class="progress-bar"></div></div>
+            <div class="metric">
+                <div class="metric-header"><span class="metric-name">Memory Matrix</span><span class="metric-val" id="mem-txt">--</span></div>
+                <div class="bar-track"><div class="bar-fill" id="mem-bar" style="width:0%"></div></div>
             </div>
-            
-            <div class="stat-group">
-                <span class="stat-label">BUFFER CAPACITY</span>
-                <div class="stat-row"><span>MEMORY MATRIX</span><span id="mem-val" class="stat-val">--%</span></div>
-                <div class="progress-container"><div id="mem-bar" class="progress-bar"></div></div>
+            <div class="metric">
+                <div class="metric-header"><span class="metric-name">Storage Index</span><span class="metric-val" id="disk-txt">--</span></div>
+                <div class="bar-track"><div class="bar-fill" id="disk-bar" style="width:0%"></div></div>
             </div>
- 
-            <div class="stat-group">
-                <span class="stat-label">STORAGE INDEX</span>
-                <div class="stat-row"><span>DISK MATRIX</span><span id="disk-val" class="stat-val">--%</span></div>
-                <div class="progress-container"><div id="disk-bar" class="progress-bar"></div></div>
+            <div style="margin-top:8px;">
+                <div class="net-row"><span class="net-label">Net Incoming</span><span class="net-val net-in" id="net-in">0.0 B/s</span></div>
+                <div class="net-row"><span class="net-label">Net Outgoing</span><span class="net-val net-out" id="net-out">0.0 B/s</span></div>
             </div>
-            
-            <div class="stat-group">
-                <span class="stat-label">LINK NETWORK TELEMETRY</span>
-                <div class="stat-row" style="margin-bottom:6px;"><span>NET INCOMING</span><span id="net-in-val" class="stat-val" style="color:#00f5d4;">0.0 B/s</span></div>
-                <div class="stat-row"><span>NET OUTGOING</span><span id="net-out-val" class="stat-val" style="color:#00bbf9;">0.0 B/s</span></div>
-            </div>
- 
-            <div class="stat-group" style="margin-top:18px; border-top:1px dashed rgba(0,240,255,0.12); padding-top:15px;">
-                <span class="stat-label">COGNITIVE FOCUS</span>
-                <div class="stat-row" style="background: rgba(0,240,255,0.03); border: 1px solid rgba(0,240,255,0.08); padding: 5px 8px; border-radius: 4px;">
-                    <span id="focus-win-val" class="stat-val" style="font-size:11px; color:#8ecae6; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; width:100%; font-family: var(--font-mono); letter-spacing: 0.5px;">System Idle</span>
-                </div>
-            </div>
+            <div class="focus-box" id="focus-win">System Idle</div>
         </div>
- 
-        <div class="panel" id="center-panel">
-            <div class="arc-container">
-                <!-- Advanced Multi-Ring Holographic Arc Reactor SVG -->
-                <svg width="220" height="220" viewBox="0 0 200 200" id="arc-svg">
-                    <!-- Outer Grid Ring -->
-                    <circle cx="100" cy="100" r="96" fill="none" stroke="rgba(0, 240, 255, 0.08)" stroke-width="1" />
-                    <circle cx="100" cy="100" r="92" fill="none" stroke="rgba(0, 240, 255, 0.15)" stroke-width="1.5" stroke-dasharray="2 6" class="ring-spin-ccw-slow" />
-                    
-                    <!-- Middle Dials -->
-                    <circle cx="100" cy="100" r="84" fill="none" stroke="rgba(0, 240, 255, 0.2)" stroke-width="2" stroke-dasharray="12 16" class="ring-spin-cw" />
-                    <circle cx="100" cy="100" r="74" fill="none" stroke="rgba(0, 240, 255, 0.15)" stroke-width="1" />
-                    
-                    <!-- Outer Target Marks -->
-                    <line x1="100" y1="4" x2="100" y2="12" stroke="rgba(0, 240, 255, 0.4)" stroke-width="1.5" />
-                    <line x1="100" y1="188" x2="100" y2="196" stroke="rgba(0, 240, 255, 0.4)" stroke-width="1.5" />
-                    <line x1="4" y1="100" x2="12" y2="100" stroke="rgba(0, 240, 255, 0.4)" stroke-width="1.5" />
-                    <line x1="188" y1="100" x2="196" y2="100" stroke="rgba(0, 240, 255, 0.4)" stroke-width="1.5" />
-                    
-                    <!-- Intercepting Triangles -->
-                    <polygon points="100,38 153,130 47,130" fill="none" stroke="rgba(0, 240, 255, 0.25)" stroke-width="1.5" class="core-tri" />
-                    <polygon points="100,162 47,70 153,70" fill="none" stroke="rgba(0, 240, 255, 0.08)" stroke-width="1" class="ring-spin-ccw-slow" />
-                    
-                    <!-- Inner Active Gears -->
-                    <circle cx="100" cy="100" r="62" fill="none" stroke="rgba(0, 240, 255, 0.3)" stroke-width="3" stroke-dasharray="6 8" class="ring-spin-ccw" />
-                    <circle cx="100" cy="100" r="50" fill="none" stroke="rgba(0, 240, 255, 0.12)" stroke-width="1" />
-                    <circle cx="100" cy="100" r="42" fill="none" stroke="rgba(0, 240, 255, 0.4)" stroke-width="2.5" stroke-dasharray="14 5" class="ring-spin-cw" />
-                    
-                    <!-- Core Reactor Center -->
-                    <circle cx="100" cy="100" r="28" fill="url(#core-glow)" id="reactor-core-glow" />
-                    <circle cx="100" cy="100" r="16" fill="#ffffff" id="reactor-core-white" />
+        <div class="hud-panel" id="center-panel">
+            <div class="reactor-wrap">
+                <svg class="reactor-svg" viewBox="0 0 200 200">
                     <defs>
-                        <radialGradient id="core-glow" cx="50%" cy="50%" r="50%">
+                        <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
                             <stop offset="0%" stop-color="#ffffff" />
-                            <stop offset="65%" stop-color="#00f0ff" stop-opacity="0.95" />
-                            <stop offset="100%" stop-color="#00f0ff" stop-opacity="0" />
+                            <stop offset="50%" stop-color="#00d4ff" />
+                            <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
                         </radialGradient>
                     </defs>
+                    <circle cx="100" cy="100" r="95" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="1" />
+                    <circle cx="100" cy="100" r="90" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1.5" stroke-dasharray="4 8" class="ring-hex" />
+                    <circle cx="100" cy="100" r="82" fill="none" stroke="rgba(0,212,255,0.2)" stroke-width="2" stroke-dasharray="10 14" class="ring-outer" />
+                    <circle cx="100" cy="100" r="72" fill="none" stroke="rgba(0,212,255,0.08)" stroke-width="1" />
+                    <circle cx="100" cy="100" r="64" fill="none" stroke="rgba(0,212,255,0.25)" stroke-width="2.5" stroke-dasharray="6 6" class="ring-mid" />
+                    <circle cx="100" cy="100" r="54" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1" />
+                    <circle cx="100" cy="100" r="46" fill="none" stroke="rgba(0,212,255,0.3)" stroke-width="2" stroke-dasharray="12 4" class="ring-inner" />
+                    <circle cx="100" cy="100" r="36" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1" />
+                    <circle cx="100" cy="100" r="28" fill="url(#coreGrad)" class="core-glow" id="reactor-core" />
+                    <circle cx="100" cy="100" r="14" fill="#fff" opacity="0.9" />
+                    <line x1="100" y1="5" x2="100" y2="15" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
+                    <line x1="100" y1="185" x2="100" y2="195" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
+                    <line x1="5" y1="100" x2="15" y2="100" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
+                    <line x1="185" y1="100" x2="195" y2="100" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
                 </svg>
             </div>
-            <div id="status-display">CORE STATUS: <span id="status-txt">INIT</span></div>
+            <canvas id="audio-viz" width="260" height="60"></canvas>
+            <div class="status-banner" id="center-status">CORE STATUS: INIT</div>
         </div>
- 
-        <div class="panel" id="right-panel">
-            <div class="panel-title">NEURAL ACTIVITY STREAM</div>
+        <div class="hud-panel" id="right-panel">
+            <div class="panel-label">NEURAL ACTIVITY <span>// COMMS</span></div>
             <div id="log-area"></div>
         </div>
     </main>
- 
     <footer>
-        <div class="input-bar">
-            <input type="text" id="cmd-input" placeholder="Awaiting operators command, Sir..." onkeydown="if(event.key==='Enter') sendCmd()">
+        <div class="input-row">
+            <input type="text" id="cmd-input" placeholder="Awaiting command, Sir..." autocomplete="off">
             <button class="exec-btn" onclick="sendCmd()">EXECUTE</button>
         </div>
-        
-        <div class="footer-control-panel">
-            <!-- Model Dropdown -->
-            <div class="control-widget">
-                <label>MODEL SELECT</label>
+        <div class="controls-row">
+            <div class="ctrl-group">
+                <span class="ctrl-label">Model</span>
                 <select id="model-select" onchange="changeModel(this.value)">
-                    <option value="gemini-3.1-flash-live-preview">Gemini 3.1 Live</option>
-                    <option value="gemini-2.0-flash">Gemini 2.0 Flash</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                    <option value="gemini-3.5-flash">Gemini 3.5 Flash</option>
+                    <option value="gemini-2.5-flash-native-audio-latest">Gemini 2.5 Audio</option>
+                    <option value="gemini-2.0-flash-live-preview-04-09">Gemini 2.0 Live</option>
                 </select>
+                <span id="model-badge" class="badge badge-fallback" style="display:none"></span>
             </div>
-            
-            <!-- Voice core slider -->
-            <div class="control-widget">
-                <label>VOICE CORE</label>
-                <div class="toggle-container">
-                    <span class="toggle-label">OFF</span>
-                    <label class="switch">
-                        <input type="checkbox" id="voice-toggle" onchange="toggleVoice(this.checked)">
-                        <span class="slider"></span>
-                    </label>
-                    <span class="toggle-label">ON</span>
-                </div>
+            <div class="ctrl-group">
+                <span class="ctrl-label">Voice</span>
+                <label class="switch" style="position:relative;display:inline-block;width:36px;height:18px;">
+                    <input type="checkbox" id="voice-toggle" onchange="toggleVoice(this.checked)" style="opacity:0;width:0;height:0;">
+                    <span class="voice-track" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.2);transition:.4s;border-radius:20px;"></span>
+                    <span class="voice-slider" style="position:absolute;content:'';height:12px;width:12px;left:2px;bottom:2px;background:#5a7a99;transition:.4s;border-radius:50%;"></span>
+                </label>
+                <style>
+                    #voice-toggle:checked ~ .voice-track { background: rgba(0,212,255,0.25) !important; border-color: var(--jarvis-cyan) !important; }
+                    #voice-toggle:checked ~ .voice-slider { transform: translateX(18px); background: var(--jarvis-cyan) !important; box-shadow: 0 0 6px var(--jarvis-cyan); }
+                </style>
             </div>
-            
-            <!-- Mic Trigger Button -->
-            <button id="mic-btn" onclick="toggleMic()" class="hud-btn mic-btn-inactive" disabled>
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/>
-                    <path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v4M8 23h8"/>
-                </svg>
-                <span>MIC OFF</span>
+            <button id="mic-btn" class="hud-btn mic-btn-inactive" onclick="toggleMic()" disabled>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v4M8 23h8"/></svg>
+                <span>MIC</span>
             </button>
-            
-            <!-- Handshake Trigger -->
-            <button onclick="reconnectCore()" class="hud-btn glow-cyan">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/>
-                </svg>
-                <span>RE-LINK</span>
+            <button class="hud-btn" onclick="reconnectCore()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                RE-LINK
             </button>
- 
-            <!-- Reset Handshake -->
-            <button onclick="resetCore()" class="hud-btn glow-yellow">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
-                    <path d="M3 3v5h5"/>
-                </svg>
-                <span>RESET</span>
+            <button class="hud-btn" onclick="resetCore()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+                RESET
             </button>
-
-            <!-- Purge log stream -->
-            <button onclick="clearConsole()" class="hud-btn glow-red">
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="3 6 5 6 21 6"/>
-                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
-                </svg>
-                <span>PURGE</span>
+            <button class="hud-btn" onclick="clearLog()">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+                PURGE
             </button>
         </div>
     </footer>
@@ -951,80 +791,135 @@ UI_HTML = """
 </html>
 """
 
-JARVIS_TOOLS = [
-    {
-        "name": "open_application",
-        "description": "Launches a custom system command or opens applications.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "command": {"type": "STRING", "description": "The command string or execution path."}
-            },
-            "required": ["command"]
-        }
-    },
-    {
-        "name": "take_screenshot",
-        "description": "Takes a high-resolution layout screenshot, saves it locally, and sends the image back to the live connection so you can see the screen.",
-        "parameters": {"type": "OBJECT", "properties": {}}
-    },
-    {
-        "name": "get_system_info",
-        "description": "Retrieves detailed system diagnostics including OS, CPU, and memory specs.",
-        "parameters": {"type": "OBJECT", "properties": {}}
-    },
-    {
-        "name": "execute_shell",
-        "description": "Executes a shell command and returns the output.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "command": {"type": "STRING", "description": "The shell command to execute."}
-            },
-            "required": ["command"]
-        }
-    },
-    {
-        "name": "read_clipboard",
-        "description": "Reads the current text content from the user's system clipboard.",
-        "parameters": {"type": "OBJECT", "properties": {}}
-    },
-    {
-        "name": "write_clipboard",
-        "description": "Writes text content to the user's system clipboard.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "text": {"type": "STRING", "description": "The text to copy to the clipboard."}
-            },
-            "required": ["text"]
-        }
-    },
-    {
-        "name": "type_text",
-        "description": "Types text character-by-character on the active window using keyboard simulation.",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "text": {"type": "STRING", "description": "The text to type."}
-            },
-            "required": ["text"]
-        }
-    },
-    {
-        "name": "press_key",
-        "description": "Simulates pressing a specific keyboard key or key combination (e.g., 'enter', 'tab', 'ctrl+c').",
-        "parameters": {
-            "type": "OBJECT",
-            "properties": {
-                "key": {"type": "STRING", "description": "The key or key combo name to press."}
-            },
-            "required": ["key"]
-        }
-    }
-]
 
-# Get Active Windows Title via lightweight Win32 API
+# ==========================================
+# AUDIO ENGINE
+# ==========================================
+class AudioPlayer:
+    def __init__(self, on_level: Optional[Callable[[float], None]] = None):
+        self._queue = queue.Queue()
+        self._buffer = b''
+        self._stream = None
+        self._active = False
+        self.on_level = on_level
+        self._lock = threading.Lock()
+
+    def start(self):
+        def callback(outdata, frames, time_info, status):
+            needed = frames * 2
+            with self._lock:
+                while len(self._buffer) < needed:
+                    try:
+                        self._buffer += self._queue.get_nowait()
+                    except queue.Empty:
+                        break
+                if len(self._buffer) >= needed:
+                    chunk = self._buffer[:needed]
+                    outdata[:] = chunk
+                    self._buffer = self._buffer[needed:]
+                    if self.on_level:
+                        self.on_level(self._calculate_level(chunk))
+                else:
+                    outdata[:len(self._buffer)] = self._buffer
+                    outdata[len(self._buffer):] = b'\x00' * (needed - len(self._buffer))
+                    if self.on_level and self._buffer:
+                        self.on_level(self._calculate_level(self._buffer))
+                    self._buffer = b''
+
+        try:
+            self._stream = sd.RawOutputStream(
+                samplerate=AUDIO_SR_OUT, channels=1, dtype='int16', callback=callback
+            )
+            self._stream.start()
+            self._active = True
+        except Exception as e:
+            print(f"[AudioPlayer] Init error: {e}")
+
+    def feed(self, data: bytes):
+        if self._active:
+            self._queue.put(data)
+
+    def stop(self):
+        self._active = False
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+    def _calculate_level(self, data: bytes) -> float:
+        if not data or len(data) < 2:
+            return 0.0
+        count = len(data) // 2
+        if count == 0:
+            return 0.0
+        samples = struct.unpack(f'<{count}h', data[:count * 2])
+        sum_sq = sum(s * s for s in samples)
+        rms = math.sqrt(sum_sq / count)
+        return min(1.0, rms / 32768.0)
+
+
+class AudioRecorder:
+    def __init__(self, on_data: Callable[[bytes], None], on_level: Optional[Callable[[float], None]] = None):
+        self.on_data = on_data
+        self.on_level = on_level
+        self._stream = None
+        self._active = False
+        self._accumulator = bytearray()
+        self._last_flush = 0.0
+
+    def start(self):
+        def callback(indata, frames, time_info, status):
+            if not self._active:
+                return
+            data = bytes(indata)
+            self._accumulator.extend(data)
+            if self.on_level:
+                self.on_level(self._calculate_level(data))
+            now = time.time()
+            if now - self._last_flush >= 0.1:  # 100 ms batches
+                if self._accumulator:
+                    self.on_data(bytes(self._accumulator))
+                    self._accumulator.clear()
+                    self._last_flush = now
+
+        try:
+            self._stream = sd.RawInputStream(
+                samplerate=AUDIO_SR_IN, channels=1, dtype='int16', callback=callback
+            )
+            self._stream.start()
+            self._active = True
+            self._last_flush = time.time()
+        except Exception as e:
+            print(f"[AudioRecorder] Init error: {e}")
+
+    def stop(self):
+        self._active = False
+        if self._stream:
+            try:
+                self._stream.stop()
+                self._stream.close()
+            except Exception:
+                pass
+            self._stream = None
+
+    def _calculate_level(self, data: bytes) -> float:
+        if not data or len(data) < 2:
+            return 0.0
+        count = len(data) // 2
+        if count == 0:
+            return 0.0
+        samples = struct.unpack(f'<{count}h', data[:count * 2])
+        sum_sq = sum(s * s for s in samples)
+        rms = math.sqrt(sum_sq / count)
+        return min(1.0, rms / 32768.0)
+
+
+# ==========================================
+# TELEMETRY
+# ==========================================
 def get_active_window_title():
     if os.name != 'nt':
         return "N/A"
@@ -1035,158 +930,79 @@ def get_active_window_title():
             buf = ctypes.create_unicode_buffer(length + 1)
             ctypes.windll.user32.GetWindowTextW(hwnd, buf, length + 1)
             title = buf.value
-            if len(title) > 30:
-                title = title[:27] + "..."
-            return title
-        return "System Desktop"
+            return (title[:30] + "...") if len(title) > 30 else title
+        return "Desktop"
     except Exception:
         return "System Idle"
 
-# Smooth, low-latency audio player using sounddevice raw callback
-class AudioPlayer:
-    def __init__(self, samplerate=24000, channels=1):
-        self.q = queue.Queue()
-        self.buffer = b''
-        self.samplerate = samplerate
-        self.channels = channels
-        self._active = False
-        try:
-            self.stream = sd.RawOutputStream(
-                samplerate=self.samplerate,
-                channels=self.channels,
-                dtype='int16',
-                callback=self._callback
-            )
-            self.stream.start()
-            self._active = True
-        except Exception as e:
-            print(f"Vocalizer interface error: {e}")
 
-    def _callback(self, outdata, frames, time_info, status):
-        bytes_needed = frames * 2 * self.channels
-        while len(self.buffer) < bytes_needed:
-            try:
-                chunk = self.q.get_nowait()
-                self.buffer += chunk
-            except queue.Empty:
-                break
-
-        if len(self.buffer) >= bytes_needed:
-            outdata[:] = self.buffer[:bytes_needed]
-            self.buffer = self.buffer[bytes_needed:]
-        else:
-            outdata[:len(self.buffer)] = self.buffer
-            outdata[len(self.buffer):] = b'\x00' * (bytes_needed - len(self.buffer))
-            self.buffer = b''
-
-    def play_chunk(self, data):
-        if self._active:
-            self.q.put(data)
-
-    def stop(self):
-        if self._active:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception:
-                pass
-            self._active = False
-
-# Live microphone stream capturer
-class AudioRecorder:
-    def __init__(self, callback, samplerate=16000, channels=1):
-        self.samplerate = samplerate
-        self.channels = channels
-        self.callback = callback
-        self._active = False
-        try:
-            self.stream = sd.RawInputStream(
-                samplerate=self.samplerate,
-                channels=self.channels,
-                dtype='int16',
-                callback=self._callback
-            )
-            self._active = True
-        except Exception as e:
-            print(f"Microphone sensor error: {e}")
-
-    def _callback(self, indata, frames, time_info, status):
-        if self._active:
-            self.callback(bytes(indata))
-
-    def start(self):
-        if self._active:
-            try:
-                self.stream.start()
-            except Exception as e:
-                print(f"Microphone start error: {e}")
-
-    def stop(self):
-        if self._active:
-            try:
-                self.stream.stop()
-                self.stream.close()
-            except Exception:
-                pass
-            self._active = False
-
-# Telemetry tracking thread (updated with detailed system metrics)
 class TelemetryWorker(QThread):
-    stats_updated = pyqtSignal(int, int, int, str, str, str) # cpu, mem, disk, net_in, net_out, active_win
+    stats_updated = pyqtSignal(int, int, int, str, str, str)
 
     def __init__(self):
         super().__init__()
-        try:
-            self.last_net = psutil.net_io_counters()
-        except Exception:
-            self.last_net = None
+        self.last_net = None
         self.last_time = time.time()
 
     def run(self):
         while not self.isInterruptionRequested():
             try:
-                cpu = psutil.cpu_percent(interval=None)
-                mem = psutil.virtual_memory().percent
-                disk = psutil.disk_usage('/').percent
-                
-                # Network speeds calculation
+                cpu = int(psutil.cpu_percent(interval=None))
+                mem = int(psutil.virtual_memory().percent)
+                disk = self._get_disk_pct()
                 now = time.time()
                 dt = now - self.last_time
-                net_in, net_out = "0.0 B/s", "0.0 B/s"
-                
-                if self.last_net and dt > 0:
-                    try:
-                        net = psutil.net_io_counters()
-                        bytes_sent = (net.bytes_sent - self.last_net.bytes_sent) / dt
-                        bytes_recv = (net.bytes_recv - self.last_net.bytes_recv) / dt
-                        
-                        def format_speed(b):
-                            if b < 1024:
-                                return f"{b:.1f} B/s"
-                            elif b < 1024 * 1024:
-                                return f"{b/1024:.1f} KB/s"
-                            else:
-                                return f"{b/(1024*1024):.1f} MB/s"
-                        
-                        net_out = format_speed(bytes_sent)
-                        net_in = format_speed(bytes_recv)
-                        self.last_net = net
-                    except Exception:
-                        pass
-                
+                net_in, net_out = self._get_net(dt)
                 self.last_time = now
-                active_win = get_active_window_title()
-                
-                self.stats_updated.emit(int(cpu), int(mem), int(disk), net_in, net_out, active_win)
-                self.msleep(1000)
+                self.stats_updated.emit(cpu, mem, disk, net_in, net_out, get_active_window_title())
             except Exception:
                 pass
+            self.msleep(TELEMETRY_INTERVAL_MS)
 
+    def _get_disk_pct(self):
+        try:
+            for path in ['/', 'C:\\']:
+                try:
+                    return int(psutil.disk_usage(path).percent)
+                except Exception:
+                    continue
+            return 0
+        except Exception:
+            return 0
+
+    def _get_net(self, dt):
+        if dt <= 0:
+            return "0.0 B/s", "0.0 B/s"
+        try:
+            net = psutil.net_io_counters()
+            if self.last_net is None:
+                self.last_net = net
+                return "0.0 B/s", "0.0 B/s"
+            bs = (net.bytes_sent - self.last_net.bytes_sent) / dt
+            br = (net.bytes_recv - self.last_net.bytes_recv) / dt
+            self.last_net = net
+            return self._fmt(br), self._fmt(bs)
+        except Exception:
+            return "0.0 B/s", "0.0 B/s"
+
+    def _fmt(self, b):
+        if b < 1024:
+            return f"{b:.1f} B/s"
+        elif b < 1024 * 1024:
+            return f"{b / 1024:.1f} KB/s"
+        return f"{b / (1024 * 1024):.1f} MB/s"
+
+
+# ==========================================
+# BRIDGE
+# ==========================================
 class PyBridge(QObject):
-    # Signals for thread-safe UI updates
     logReceived = pyqtSignal(str, str)
     statusUpdated = pyqtSignal(str)
-    telemetryUpdated = pyqtSignal(int, int, int, str, str, str) # cpu, mem, disk, net_in, net_out, active_win
+    telemetryUpdated = pyqtSignal(int, int, int, str, str, str)
+    modelSwitched = pyqtSignal(str, bool)
+    audioLevelUpdated = pyqtSignal(float)
+    toastReceived = pyqtSignal(str, str)
 
     def __init__(self, window_handle):
         super().__init__()
@@ -1194,398 +1010,557 @@ class PyBridge(QObject):
 
     @pyqtSlot(str)
     def submitCommand(self, text):
-        if self.window.runner:
-            self.window.runner.dispatch_text(text)
+        if self.window.core:
+            self.window.core.dispatch_text(text)
 
     @pyqtSlot()
     def onBridgeReady(self):
         self.window.ui_ready = True
-        self.logReceived.emit("JARVIS", "Matrix Core XL initialized. Telemetry channels online.")
-        self.window.start_backend_engine()
+        self.logReceived.emit("JARVIS", "Neural matrix online. All systems nominal. Awaiting your command, Sir.")
+        self.telemetryUpdated.emit(0, 0, 0, "0.0 B/s", "0.0 B/s", "System Idle")
+        self.window.start_core()
 
     @pyqtSlot(str)
     def setVoiceModeEnabled(self, enabled_str):
         enabled = enabled_str.lower() == "true"
-        if self.window.runner:
-            self.window.runner.set_voice_mode(enabled)
+        if self.window.core:
+            self.window.core.set_voice_mode(enabled)
 
     @pyqtSlot(str)
     def changeModel(self, model_name):
-        if self.window.runner:
-            self.window.runner.change_model(model_name)
+        if self.window.core:
+            self.window.core.change_model(model_name)
 
     @pyqtSlot()
     def triggerReconnect(self):
-        if self.window.runner:
-            self.window.runner.trigger_reconnect()
+        if self.window.core:
+            self.window.core.trigger_reconnect()
 
     @pyqtSlot()
     def resetSession(self):
-        if self.window.runner:
-            self.window.runner.resumption_token = None
-            self.window.runner.trigger_reconnect()
-            self.logReceived.emit("ACTION", "Resumption token purged. Neural matrix fully reset.")
+        if self.window.core:
+            self.window.core.reset_session()
 
     @pyqtSlot(bool)
     def setMicActive(self, active):
         self.window.set_mic_active(active)
 
 
-class JarvisCoreRunner:
-    def __init__(self, main_win):
-        self.main_win = main_win
+# ==========================================
+# CORE INTELLIGENCE
+# ==========================================
+class JarvisCore:
+    def __init__(self, bridge: PyBridge):
+        self.bridge = bridge
         self.loop = asyncio.new_event_loop()
-        self.client = None
+        self.thread = threading.Thread(target=self._run_loop, daemon=True, name="JarvisAsync")
+
+        self.client: Optional[genai.Client] = None
         self.session = None
-        self.resumption_token = None
-        self.tool_call_pending = False
-        self.turn_complete_received = False
         self.session_ready = asyncio.Event()
-        self._running = True
-        self.model_id = "gemini-3.1-flash-live-preview"
-        self.voice_mode = False
-        self.audio_player = None
-        
-        api_key = self._fetch_key()
-        if api_key:
-            self.client = genai.Client(api_key=api_key)
-            
-        self.thread = threading.Thread(target=self._start_async_loop, daemon=True)
+        self._shutdown = False
+        self._state = "INIT"
+        self._state_lock = threading.Lock()
+
+        self.voice_enabled = False
+        self.mic_active = False
+
+        self.audio_player = AudioPlayer(on_level=self._on_audio_level)
+        self.audio_recorder: Optional[AudioRecorder] = None
+
+        self.model_pool = list(MODEL_POOL)
+        self.current_model_idx = 0
+        self.resumption_token: Optional[str] = None
+        self.reconnect_backoff = 1.0
+        self.max_backoff = 60.0
+        self.retry_cycle = 0
+
+        self.history: List[types.Content] = []
+        self.pending_messages: List[str] = []
+        self._response_buffer = ""
+        self._response_lock = threading.Lock()
+        self.context_tokens = 0
+        self.context_chars = 0
+
+        self._api_key = self._load_api_key()
+        if self._api_key:
+            self.client = genai.Client(api_key=self._api_key)
+
         self.thread.start()
 
-    def stop(self):
-        self._running = False
-        if self.audio_player:
-            self.audio_player.stop()
-        if self.loop:
-            self.loop.call_soon_threadsafe(self.loop.stop)
+    def _run_loop(self):
+        asyncio.set_event_loop(self.loop)
+        try:
+            self.loop.run_until_complete(self._main_loop())
+        except Exception as e:
+            print(f"[JarvisCore] Loop fatal: {e}")
 
-    def _fetch_key(self):
+    async def _main_loop(self):
+        self.set_state("BOOT")
+        await asyncio.sleep(1.5)
+        if not self.client:
+            self._emit_log("SYSTEM", "API Key not found. Please configure api_keys.json or set GEMINI_API_KEY.")
+            self.set_state("OFFLINE")
+            return
+        await self._connect_pipeline()
+
+    def set_state(self, state: str):
+        with self._state_lock:
+            self._state = state
+        self.bridge.statusUpdated.emit(state)
+
+    def get_state(self) -> str:
+        with self._state_lock:
+            return self._state
+
+    def _emit_log(self, sender: str, text: str):
+        self.bridge.logReceived.emit(sender, text)
+
+    def _on_audio_level(self, level: float):
+        self.bridge.audioLevelUpdated.emit(level)
+
+    def _load_api_key(self):
         if API_CONFIG_PATH.exists():
             try:
                 with open(API_CONFIG_PATH, "r") as f:
-                    config = json.load(f)
-                    return config.get("gemini_api_key")
+                    return json.load(f).get("gemini_api_key")
             except Exception:
                 pass
         return os.environ.get("GEMINI_API_KEY")
 
-    def _start_async_loop(self):
-        asyncio.set_event_loop(self.loop)
-        try:
-            self.loop.run_until_complete(self._connect_live_pipeline())
-        except Exception as e:
-            print(f"Loop error: {e}")
+    def _build_system_prompt(self) -> str:
+        from datetime import datetime
+        return SYSTEM_PROMPT.format(
+            time=datetime.now().strftime("%H:%M:%S"),
+            date=datetime.now().strftime("%Y-%m-%d")
+        )
 
-    def change_model(self, model_name):
-        self.model_id = model_name
-        self.resumption_token = None
-        self.trigger_reconnect()
+    def _add_history(self, role: str, text: str):
+        self.history.append(types.Content(parts=[types.Part.from_text(text=text)], role=role))
+        self.context_chars += len(text)
+        self.context_tokens += max(1, len(text) // 4)
+        while len(self.history) > MAX_HISTORY:
+            removed = self.history.pop(0)
+            txt = ''.join(p.text for p in removed.parts if hasattr(p, 'text') and p.text)
+            self.context_chars -= len(txt)
+            self.context_tokens -= max(1, len(txt) // 4)
 
-    def set_voice_mode(self, enabled):
-        self.voice_mode = enabled
-        if self.voice_mode:
-            if not self.audio_player:
-                self.audio_player = AudioPlayer()
+    def dispatch_text(self, text: str):
+        self._emit_log("YOU", text)
+        with self._response_lock:
+            self._response_buffer = ""
+        if not self.session_ready.is_set() or not self.session:
+            self.pending_messages.append(text)
+            self._emit_log("SYSTEM", "Connection unstable. Command buffered for re-link.")
+            return
+        self._add_history("user", text)
+        asyncio.run_coroutine_threadsafe(
+            self.session.send_client_content(
+                turns=[types.Content(parts=[types.Part.from_text(text=text)], role='user')],
+                turn_complete=True
+            ), self.loop
+        )
+        self.set_state("THINKING")
+
+    def send_audio_chunk(self, data: bytes):
+        if self.session and self.session_ready.is_set() and self.mic_active and not self._shutdown:
+            asyncio.run_coroutine_threadsafe(
+                self.session.send_realtime_input(
+                    media=types.Blob(mime_type="audio/pcm;rate=16000", data=data)
+                ), self.loop
+            )
+
+    def set_voice_mode(self, enabled: bool):
+        self.voice_enabled = enabled
+        if enabled:
+            self.audio_player.start()
         else:
-            if self.audio_player:
-                self.audio_player.stop()
-                self.audio_player = None
+            self.audio_player.stop()
+
+    def set_mic_active(self, active: bool):
+        self.mic_active = active
+        if active:
+            if not self.audio_recorder:
+                self.audio_recorder = AudioRecorder(
+                    on_data=self.send_audio_chunk,
+                    on_level=self._on_audio_level
+                )
+                self.audio_recorder.start()
+            else:
+                self.audio_recorder.start()
+        else:
+            if self.audio_recorder:
+                self.audio_recorder.stop()
+                self.audio_recorder = None
+
+    def change_model(self, model_name: str):
+        if model_name in self.model_pool:
+            idx = self.model_pool.index(model_name)
+            self.model_pool[0], self.model_pool[idx] = self.model_pool[idx], self.model_pool[0]
+        else:
+            self.model_pool.insert(0, model_name)
+        self.current_model_idx = 0
+        self.resumption_token = None
+        self._emit_log("SYSTEM", f"Switching neural path to {model_name}...")
+        self.trigger_reconnect()
 
     def trigger_reconnect(self):
         if self.session and self.loop:
-            asyncio.run_coroutine_threadsafe(self._safe_close_session(), self.loop)
+            asyncio.run_coroutine_threadsafe(self._safe_close(), self.loop)
 
-    async def _safe_close_session(self):
+    async def _safe_close(self):
         if self.session:
             try:
                 await self.session.close()
             except Exception:
                 pass
+            self.session = None
+            self.session_ready.clear()
 
-    async def _connect_live_pipeline(self):
-        if not self.client:
-            self.main_win.bridge.logReceived.emit("JARVIS", "CRITICAL: API Key missing in api_keys.json.")
-            self.main_win.bridge.statusUpdated.emit("OFFLINE")
-            return
+    def reset_session(self):
+        self.history.clear()
+        self.pending_messages.clear()
+        with self._response_lock:
+            self._response_buffer = ""
+        self.context_tokens = 0
+        self.context_chars = 0
+        self.resumption_token = None
+        self.current_model_idx = 0
+        self.reconnect_backoff = 1.0
+        self.retry_cycle = 0
+        self.trigger_reconnect()
+        self._emit_log("SYSTEM", "Neural matrix fully purged. Fresh session initiated.")
 
-        from datetime import datetime
-        
-        while self._running:
-            # The Multimodal Live API requires AUDIO modality to establish a stable connection.
-            # We always request "AUDIO". Toggling voice core is managed purely locally.
-            modalities = ["AUDIO"]
+    def stop(self):
+        self._shutdown = True
+        self.audio_player.stop()
+        if self.audio_recorder:
+            self.audio_recorder.stop()
+        if self.session:
+            asyncio.run_coroutine_threadsafe(self._safe_close(), self.loop)
+        self.loop.call_soon_threadsafe(self.loop.stop)
 
-            # Enable session resumption for fast reconnects when token available
-            config = types.LiveConnectConfig(
-                response_modalities=modalities,
-                system_instruction=types.Content(parts=[types.Part.from_text(text=SYSTEM_PROMPT.format(time=datetime.now().strftime("%H:%M:%S")))]),
-                tools=[types.Tool(function_declarations=JARVIS_TOOLS)],
-                speech_config=types.SpeechConfig(
-                    voice_config=types.VoiceConfig(prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede"))
-                ),
-                temperature=0.5,
-            )
-            # Attach resumption token for instant recovery on reconnect
-            if self.resumption_token:
-                config.session_resumption = types.SessionResumptionConfig(handle=self.resumption_token)
+    async def _connect_pipeline(self):
+        while not self._shutdown:
+            model = self.model_pool[self.current_model_idx % len(self.model_pool)]
+            is_fallback = self.current_model_idx > 0
 
             try:
-                # Only signal re-linking if we don't have an active session
-                if not self.session:
-                    self.main_win.bridge.statusUpdated.emit("RE-LINKING")
+                self.set_state("RECONNECTING" if is_fallback else "CONNECTING")
+                self.bridge.modelSwitched.emit(model, is_fallback)
 
-                async with self.client.aio.live.connect(model=self.model_id, config=config) as session:
+                config = types.LiveConnectConfig(
+                    response_modalities=["AUDIO"],
+                    system_instruction=types.Content(
+                        parts=[types.Part.from_text(text=self._build_system_prompt())],
+                        role="user"
+                    ),
+                    tools=[types.Tool(function_declarations=JARVIS_TOOLS)],
+                    speech_config=types.SpeechConfig(
+                        voice_config=types.VoiceConfig(
+                            prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+                        )
+                    ),
+                    temperature=0.4,
+                )
+                if self.resumption_token:
+                    config.session_resumption = types.SessionResumptionConfig(handle=self.resumption_token)
+
+                async with self.client.aio.live.connect(model=model, config=config) as session:
                     self.session = session
                     self.session_ready.set()
-                    self.main_win.bridge.statusUpdated.emit("READY")
-                    
+
+                    # Context restoration
+                    if self.history and not self.resumption_token:
+                        try:
+                            context_turns = self.history[-MAX_HISTORY:]
+                            await session.send_client_content(turns=context_turns, turn_complete=False)
+                            self._emit_log("SYSTEM", f"Context restored: {len(context_turns)} turns.")
+                        except Exception as e:
+                            self._emit_log("SYSTEM", f"Context restore warning: {str(e)[:80]}")
+
+                    self._flush_pending()
+                    self.reconnect_backoff = 1.0
+                    self.current_model_idx = 0
+                    self.retry_cycle = 0
+                    self.set_state("READY")
+
                     async for response in session.receive():
-                        if not self._running: break
-                        await self._handle_server_response(response)
-                
-                # If we get here, the session closed normally
-                self.session = None
-                self.session_ready.clear()
-                retry_delay = 0.3
+                        if self._shutdown:
+                            break
+                        await self._handle_response(response)
+
             except Exception as e:
-                # Log full error for diagnostics
-                import traceback
-                print(f"Socket connection error: {e}")
-                traceback.print_exc()
-                
-                # If session resumption failed (e.g. token expired), reset it
-                if self.resumption_token:
-                    self.main_win.bridge.logReceived.emit("ACTION", "Resumption failed. Establishing a fresh neural session...")
-                    self.resumption_token = None
+                await self._handle_connection_error(e)
 
-                self.session = None
-                if self._running:
-                    # Only signal RE-LINKING if this was a failure
-                    self.main_win.bridge.statusUpdated.emit("RE-LINKING")
-                    retry_delay = 1.0
-                else:
-                    break
-            
-            if self._running:
-                await asyncio.sleep(retry_delay)
+    async def _handle_connection_error(self, e: Exception):
+        err = str(e).lower()
+        err_type = "NETWORK"
+        if any(x in err for x in ["401", "403", "unauthorized", "api key invalid", "authentication"]):
+            err_type = "AUTH"
+        elif any(x in err for x in ["429", "rate limit", "quota", "too many requests"]):
+            err_type = "RATE"
+        elif any(x in err for x in ["not found", "1008", "unsupported", "model", "does not support"]):
+            err_type = "MODEL"
+        elif any(x in err for x in ["500", "502", "503", "504", "internal", "unavailable", "deadline exceeded"]):
+            err_type = "SERVER"
 
-    def dispatch_text(self, text):
-        """Dispatch user text on the current session."""
-        if self.session and self.loop and self._running:
-            asyncio.run_coroutine_threadsafe(
-                self.session.send_client_content(
-                    turns=[types.Content(parts=[types.Part.from_text(text=text)], role='user')],
-                    turn_complete=True
-                ), self.loop
-            )
+        if err_type == "AUTH":
+            self._emit_log("SYSTEM", f"Authentication failed. Check your API key. ({str(e)[:60]})")
+            self.set_state("OFFLINE")
+            await self._wait_shutdown(30)
+            return
+        elif err_type == "RATE":
+            self.reconnect_backoff = min(self.reconnect_backoff * 2, self.max_backoff)
+            self._emit_log("SYSTEM", f"Rate limited. Backing off {self.reconnect_backoff:.1f}s...")
+        elif err_type == "MODEL":
+            self.current_model_idx += 1
+            if self.current_model_idx >= len(self.model_pool):
+                self.current_model_idx = 0
+                self.retry_cycle += 1
+                if self.retry_cycle >= 3:
+                    self._emit_log("SYSTEM", "All neural paths exhausted. Entering hibernation mode.")
+                    self.set_state("OFFLINE")
+                    await self._wait_shutdown(30)
+                    self.retry_cycle = 0
+                    return
+            self._emit_log("SYSTEM", f"Model path failed. Rerouting to {self.model_pool[self.current_model_idx]}...")
+            self.reconnect_backoff = 1.0
+        else:
+            self.reconnect_backoff = min(self.reconnect_backoff * 2, self.max_backoff)
+            self._emit_log("SYSTEM", f"Connection anomaly: {str(e)[:60]}. Re-linking in {self.reconnect_backoff:.1f}s...")
 
-    def send_audio_chunk(self, data):
-        # Only stream audio chunks if a tool call is not pending (avoiding 1008 protocol violation)
-        if self.session and self.loop and self._running and self.voice_mode and not self.tool_call_pending:
-            asyncio.run_coroutine_threadsafe(
-                self.session.send_realtime_input(
-                    media=types.Blob(mime_type="audio/pcm", data=data)
-                ), self.loop
-            )
+        self.session = None
+        self.session_ready.clear()
 
-    async def _handle_server_response(self, response):
+        jitter = random.uniform(0, 1.0)
+        await asyncio.sleep(self.reconnect_backoff + jitter)
+
+    async def _wait_shutdown(self, seconds: int):
+        for _ in range(seconds * 2):
+            if self._shutdown:
+                return
+            await asyncio.sleep(0.5)
+
+    def _flush_pending(self):
+        if not self.session or not self.session_ready.is_set():
+            return
+        while self.pending_messages:
+            msg = self.pending_messages.pop(0)
+            self._add_history("user", msg)
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self.session.send_client_content(
+                        turns=[types.Content(parts=[types.Part.from_text(text=msg)], role='user')],
+                        turn_complete=True
+                    ), self.loop
+                )
+            except Exception:
+                self.pending_messages.insert(0, msg)
+                break
+
+    async def _handle_response(self, response):
         try:
-            res_update = getattr(response, 'session_resumption_update', None)
-            if res_update and getattr(res_update, 'new_handle', None):
-                self.resumption_token = res_update.new_handle
-
-            text_content = ""
+            # Resumption token
+            if hasattr(response, 'session_resumption_update') and response.session_resumption_update:
+                new_handle = getattr(response.session_resumption_update, 'new_handle', None)
+                if new_handle:
+                    self.resumption_token = new_handle
 
             if hasattr(response, 'server_content') and response.server_content:
-                content = response.server_content
-                if hasattr(content, 'model_turn') and content.model_turn:
-                    for part in content.model_turn.parts:
-                        if hasattr(part, 'text') and part.text:
-                            text_content += part.text
-                        
-                        # Realtime PCM voice playback
-                        if getattr(part, 'inline_data', None) and part.inline_data:
-                            if self.voice_mode and self.audio_player:
-                                self.main_win.bridge.statusUpdated.emit("SPEAKING")
-                                self.audio_player.play_chunk(part.inline_data.data)
-                
-                if getattr(content, 'turn_complete', False):
-                    self.turn_complete_received = True
-                    self.main_win.bridge.statusUpdated.emit("READY")
+                sc = response.server_content
 
-                if hasattr(content, 'output_transcription') and content.output_transcription:
-                    text_content += content.output_transcription.text
+                # Audio playback
+                if hasattr(sc, 'model_turn') and sc.model_turn:
+                    for part in sc.model_turn.parts:
+                        if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
+                            if self.voice_enabled:
+                                self.set_state("SPEAKING")
+                                self.audio_player.feed(part.inline_data.data)
 
-            if hasattr(response, 'text') and response.text:
-                text_content += response.text
+                # Text transcription (streaming)
+                if hasattr(sc, 'output_transcription') and sc.output_transcription:
+                    text = sc.output_transcription.text
+                    if text:
+                        with self._response_lock:
+                            self._response_buffer += text
+                        self._emit_log("JARVIS", text)
 
-            if text_content:
-                self.main_win.bridge.logReceived.emit("JARVIS", text_content)
+                # Turn complete
+                if getattr(sc, 'turn_complete', False):
+                    with self._response_lock:
+                        if self._response_buffer:
+                            final = self._response_buffer.strip()
+                            self._add_history("model", final)
+                            self._response_buffer = ""
+                    self.set_state("READY")
 
-            tool_call = getattr(response, 'tool_call', None)
-            if tool_call and getattr(tool_call, 'function_calls', None):
-                self.tool_call_pending = True
-                try:
-                    for call in tool_call.function_calls:
-                        await self._execute_tool_sequence(call)
-                finally:
-                    self.tool_call_pending = False
+            # Tool calls
+            if hasattr(response, 'tool_call') and response.tool_call:
+                calls = response.tool_call.function_calls
+                if calls:
+                    self.set_state("THINKING")
+                    with self._response_lock:
+                        if self._response_buffer:
+                            self._add_history("model", self._response_buffer.strip())
+                            self._response_buffer = ""
+                    for call in calls:
+                        await self._execute_tool(call)
+                    self.set_state("READY")
+
         except Exception as e:
             import traceback
-            self.main_win.bridge.logReceived.emit("JARVIS", f"Response handler error (resilient): {e}")
+            self._emit_log("SYSTEM", f"Response processing error: {e}")
             traceback.print_exc()
 
-    async def _execute_tool_sequence(self, call):
+    async def _execute_tool(self, call):
         name = call.name
-        args = call.args
+        args = call.args or {}
         call_id = call.id
-        result = "Done"
+        self._emit_log("ACTION", f"Executing protocol: {name}...")
 
-        self.main_win.bridge.logReceived.emit("ACTION", f"Deploying sensor tool: {name}...")
-
+        result = ""
         try:
             if name == "open_application":
-                cmd = args.get("command")
-                os.startfile(cmd) if os.name == 'nt' else os.system(f"{cmd} &")
-                result = f"Successfully launched {cmd}"
+                result = await asyncio.to_thread(self._tool_open_app, args.get("command"))
             elif name == "take_screenshot":
-                # Upgraded Screenshot: Save and transmit image back to Gemini Live
-                screenshot_path = BASE_DIR / "screenshot.png"
-                pyautogui.screenshot(str(screenshot_path))
-                
-                # Load image, scale for efficiency and send as inline media
-                img = pyautogui.screenshot()
-                img.thumbnail((1024, 1024))
-                buf = io.BytesIO()
-                img.save(buf, format="JPEG", quality=80)
-                img_bytes = buf.getvalue()
-                
-                # Transmit screenshot into Active Live Session in background
-                if self.session and self.loop:
-                    asyncio.run_coroutine_threadsafe(
-                        self.session.send_realtime_input(
-                            media=types.Blob(mime_type="image/jpeg", data=img_bytes)
-                        ), self.loop
-                    )
-                result = f"Screenshot saved to {screenshot_path} and injected into live visual buffers."
+                result = await asyncio.to_thread(self._tool_screenshot)
             elif name == "get_system_info":
-                import platform
-                info = {
-                    "OS": platform.system(),
-                    "Version": platform.version(),
-                    "Processor": platform.processor(),
-                    "Cores": psutil.cpu_count(logical=False),
-                    "Memory": f"{round(psutil.virtual_memory().total / (1024**3), 2)} GB",
-                    "Battery": f"{psutil.sensors_battery().percent}%" if psutil.sensors_battery() else "AC Power"
-                }
-                result = json.dumps(info)
+                result = await asyncio.to_thread(self._tool_system_info)
             elif name == "execute_shell":
-                import subprocess
-                cmd = args.get("command")
-                res = subprocess.check_output(cmd, shell=True, stderr=subprocess.STDOUT, timeout=30)
-                result = res.decode('utf-8')
+                result = await self._tool_shell(args.get("command"))
             elif name == "read_clipboard":
-                result = pyperclip.paste()
-                if not result:
-                    result = "[Clipboard is currently empty]"
+                result = await asyncio.to_thread(pyperclip.paste) or "[Clipboard empty]"
             elif name == "write_clipboard":
-                text = args.get("text")
-                pyperclip.copy(text)
-                result = f"Text copied to clipboard ({len(text)} chars)."
+                text = args.get("text", "")
+                await asyncio.to_thread(pyperclip.copy, text)
+                result = f"Copied {len(text)} characters to clipboard."
             elif name == "type_text":
-                text = args.get("text")
-                pyautogui.write(text, interval=0.01)
+                text = args.get("text", "")
+                await asyncio.to_thread(pyautogui.write, text, interval=0.01)
                 result = f"Typed {len(text)} characters."
             elif name == "press_key":
-                key = args.get("key")
+                key = args.get("key", "")
                 if '+' in key:
                     keys = key.split('+')
-                    pyautogui.hotkey(*keys)
+                    await asyncio.to_thread(pyautogui.hotkey, *keys)
                 else:
-                    pyautogui.press(key)
-                result = f"Executed keypress {key}."
-        except subprocess.TimeoutExpired:
-            result = "Execution timed out (30s limit)."
+                    await asyncio.to_thread(pyautogui.press, key)
+                result = f"Pressed {key}."
+            else:
+                result = f"Unknown protocol: {name}"
         except Exception as e:
-            result = f"Tool failure: {str(e)}"
+            result = f"Protocol error: {str(e)}"
 
-        # Send tool response (Upgraded to use send_tool_response to avoid deprecation warnings)
-        if self.session:
+        if self.session and self.session_ready.is_set():
             try:
                 await self.session.send_tool_response(
-                    function_responses=[
-                        types.FunctionResponse(name=name, id=call_id, response={"result": result})
-                    ]
+                    function_responses=[types.FunctionResponse(name=name, id=call_id, response={"result": result})]
                 )
             except Exception as e:
-                self.main_win.bridge.logReceived.emit("JARVIS", f"Tool response transmit failed (non-critical): {e}")
+                self._emit_log("SYSTEM", f"Tool response transmission failed: {e}")
 
+    def _tool_open_app(self, command: str):
+        if os.name == 'nt':
+            os.startfile(command)
+        else:
+            os.system(f"{command} &")
+        return f"Launched {command}"
+
+    def _tool_screenshot(self):
+        path = BASE_DIR / "screenshot.jpg"
+        img = pyautogui.screenshot()
+        img.thumbnail((1024, 1024))
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        data = buf.getvalue()
+        if self.session and self.session_ready.is_set():
+            asyncio.run_coroutine_threadsafe(
+                self.session.send_realtime_input(media=types.Blob(mime_type="image/jpeg", data=data)),
+                self.loop
+            )
+        return "Screenshot captured and transmitted."
+
+    def _tool_system_info(self):
+        bat = psutil.sensors_battery()
+        info = {
+            "OS": platform.system(),
+            "Version": platform.version(),
+            "Processor": platform.processor(),
+            "Cores": psutil.cpu_count(logical=False),
+            "Logical_Cores": psutil.cpu_count(logical=True),
+            "Memory": f"{round(psutil.virtual_memory().total / (1024**3), 2)} GB",
+            "Battery": f"{bat.percent}%" if bat else "AC Power"
+        }
+        return json.dumps(info, indent=2)
+
+    async def _tool_shell(self, command: str):
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT
+        )
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30.0)
+            return stdout.decode('utf-8', errors='replace')[:2000]
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+            return "Command timed out (30s limit)."
+
+
+# ==========================================
+# MAIN WINDOW
+# ==========================================
 class JarvisMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("J.A.R.V.I.S. Core Matrix HUD")
-        self.resize(1280, 820) 
-
+        self.setWindowTitle("J.A.R.V.I.S. Core Matrix")
+        self.resize(1450, 900)
         self.ui_ready = False
+        self.core: Optional[JarvisCore] = None
+
         self.view = QWebEngineView()
         self.setCentralWidget(self.view)
-
-        # Clear caching to ensure HUD visual updates propagate immediately
         self.view.page().profile().setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
-        
+
         self.bridge = PyBridge(self)
         self.channel = QWebChannel()
         self.channel.registerObject("pyBridge", self.bridge)
         self.view.page().setWebChannel(self.channel)
-
         self.view.setHtml(UI_HTML)
-        self.runner = None
-        self.recorder = None
 
-        # Setup and start System Diagnostics telemetry
-        self.telemetry_thread = TelemetryWorker()
-        self.telemetry_thread.stats_updated.connect(self._safe_update_stats)
-        self.telemetry_thread.start()
+        self.telemetry = TelemetryWorker()
+        self.telemetry.stats_updated.connect(self._update_stats)
+        self.telemetry.start()
 
-    def start_backend_engine(self):
-        if not self.runner:
-            self.runner = JarvisCoreRunner(self)
+    def start_core(self):
+        if not self.core:
+            self.core = JarvisCore(self.bridge)
 
-    def _safe_update_stats(self, cpu, mem, disk, net_in, net_out, active_win):
-        if self.ui_ready:
-            # Safely escape backslashes and single quotes for JS execution
-            esc_win = active_win.replace('\\', '\\\\').replace("'", "\\'")
-            self.bridge.telemetryUpdated.emit(cpu, mem, disk, net_in, net_out, esc_win)
+    def _update_stats(self, cpu, mem_pct, disk_pct, net_in, net_out, win_title):
+        if self.ui_ready and self.core:
+            ai_tok = self.core.context_tokens
+            ai_char = self.core.context_chars
+            esc = win_title.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
+            self.bridge.telemetryUpdated.emit(cpu, ai_tok, ai_char, net_in, net_out, esc)
 
     def set_mic_active(self, active):
-        if active:
-            if not self.recorder:
-                self.recorder = AudioRecorder(self._handle_mic_audio)
-                self.recorder.start()
-        else:
-            if self.recorder:
-                self.recorder.stop()
-                self.recorder = None
-
-    def _handle_mic_audio(self, data):
-        if self.runner:
-            self.runner.send_audio_chunk(data)
+        if self.core:
+            self.core.set_mic_active(active)
 
     def closeEvent(self, event):
-        if self.runner:
-            self.runner.stop()
-        if self.recorder:
-            self.recorder.stop()
-        self.telemetry_thread.requestInterruption()
-        self.telemetry_thread.quit()
-        self.telemetry_thread.wait()
+        if self.core:
+            self.core.stop()
+        self.telemetry.requestInterruption()
+        self.telemetry.quit()
+        self.telemetry.wait(3000)
         super().closeEvent(event)
 
+
 if __name__ == "__main__":
-    # Disable PySide sandbox for smooth WebEngine rendering on various systems
     sys.argv.append("--no-sandbox")
     app = QApplication(sys.argv)
-    main_win = JarvisMainWindow()
-    main_win.show()
+    win = JarvisMainWindow()
+    win.show()
     sys.exit(app.exec())
