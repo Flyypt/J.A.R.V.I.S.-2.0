@@ -1709,6 +1709,11 @@ class JarvisCore:
                             prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
                         )
                     ),
+                    # Enable audio transcription so the model sends the text
+                    # transcript of what it said via sc.output_transcription.
+                    # Without this, response_modalities=["AUDIO"] gives us
+                    # spoken audio only — nothing to display in the chat.
+                    output_audio_transcription=types.AudioTranscriptionConfig(),
                     temperature=0.4,
                 )
                 if self.resumption_token:
