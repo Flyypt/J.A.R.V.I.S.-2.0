@@ -443,10 +443,13 @@ UI_HTML = """
         }
         .badge-fallback { background: rgba(255, 183, 3, 0.15); color: #ffb703; border: 1px solid rgba(255, 183, 3, 0.3); }
     </style>
-    <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" async></script>
-...
+        <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script>
+        // CRITICAL: Always dismiss boot screen after 3 seconds, no matter what
+        setTimeout(function() {
+            setBootDone();
+        }, 3000);
+
         let bridge = null;
         let activeJarvisMsg = null;
         let jarvisBuffer = "";
@@ -458,7 +461,7 @@ UI_HTML = """
         if (typeof marked !== 'undefined') marked.setOptions({ gfm: true, breaks: true });
         function md(text) {
             if (typeof marked === 'undefined') return text;
-            return DOMPurify.sanitize(marked.parse(text));
+            return (typeof DOMPurify !== 'undefined') ? DOMPurify.sanitize(marked.parse(text)) : marked.parse(text);
         }
         function esc(text) { return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
         function addCopyBtn(block) {
@@ -474,7 +477,10 @@ UI_HTML = """
             }
         }
         function setBootDone() {
-            setTimeout(() => document.getElementById('boot-overlay').classList.add('fade-out'), 600);
+            const el = document.getElementById('boot-overlay');
+            if (el && !el.classList.contains('fade-out')) {
+                el.classList.add('fade-out');
+            }
         }
         function formatTokens(n) {
             if (n >= 1000000) return (n / 1000000).toFixed(1) + 'M';
@@ -505,6 +511,7 @@ UI_HTML = """
             const label = document.getElementById('header-label');
             const core = document.getElementById('reactor-core');
             const rings = document.querySelectorAll('.reactor-svg circle[class^="ring-"]');
+            if (!banner) return;
             banner.innerText = 'CORE STATUS: ' + status;
             label.innerText = status;
             let color = '#00d4ff'; let speed = '25s';
@@ -525,6 +532,7 @@ UI_HTML = """
         }
         function showToast(msg, type='info') {
             const c = document.getElementById('toast-container');
+            if (!c) return;
             const t = document.createElement('div');
             t.className = 'toast ' + type; t.innerText = msg;
             c.appendChild(t);
@@ -621,7 +629,6 @@ UI_HTML = """
             }
         }
 
-        // Keyboard shortcuts
         document.addEventListener('keydown', (e) => {
             const inp = document.getElementById('cmd-input');
             if (document.activeElement === inp) {
@@ -639,36 +646,33 @@ UI_HTML = """
             }
         });
 
-        // Scroll detection
         document.getElementById('log-area').addEventListener('scroll', (e) => {
             const el = e.target;
             userScrolled = el.scrollHeight - el.scrollTop - el.clientHeight > 50;
         });
 
-        // Boot safety: always dismiss overlay after 3 seconds no matter what
-document.addEventListener('DOMContentLoaded', function() {
-    setTimeout(setBootDone, 3000);
-    initBridge();
-});
+        function initBridge() {
+            if (typeof qt === "undefined" || !qt.webChannelTransport) {
+                setTimeout(initBridge, 200);
+                return;
+            }
+            new QWebChannel(qt.webChannelTransport, function(ch) {
+                bridge = ch.objects.pyBridge;
+                bridge.logReceived.connect((s, t) => appendLog(s, t, s==='JARVIS'));
+                bridge.statusUpdated.connect((s) => setStatus(s));
+                bridge.telemetryUpdated.connect((c, m, d, ni, no, w) => updateStats(c, m, d, ni, no, w));
+                bridge.modelSwitched.connect((m, f) => updateModelBadge(m, f));
+                bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
+                bridge.toastReceived.connect((m, t) => showToast(m, t));
+                setStatus('READY');
+                setBootDone();
+                bridge.onBridgeReady();
+            });
+        }
 
-function initBridge() {
-    if (typeof qt === "undefined" || !qt.webChannelTransport) {
-        setTimeout(initBridge, 150);
-        return;
-    }
-    new QWebChannel(qt.webChannelTransport, function(ch) {
-        bridge = ch.objects.pyBridge;
-        bridge.logReceived.connect((s, t) => appendLog(s, t, s==='JARVIS'));
-        bridge.statusUpdated.connect((s) => setStatus(s));
-        bridge.telemetryUpdated.connect((c, m, d, ni, no, w) => updateStats(c, m, d, ni, no, w));
-        bridge.modelSwitched.connect((m, f) => updateModelBadge(m, f));
-        bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
-        bridge.toastReceived.connect((m, t) => showToast(m, t));
-        setStatus('READY');
-        setBootDone();
-        bridge.onBridgeReady();
-    });
-}
+        document.addEventListener('DOMContentLoaded', function() {
+            initBridge();
+        });
     </script>
 </head>
 <body>
