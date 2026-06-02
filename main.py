@@ -493,182 +493,53 @@ UI_HTML = """
             return n + ' B';
         }
         function updateStats(cpu, mem, disk, netIn, netOut, win) {
-            document.getElementById('cpu-bar').style.width = Math.min(100, cpu) + '%';
-            document.getElementById('cpu-txt').innerText = cpu + '%';
-            let memPct = Math.min(100, Math.round(mem / 100000 * 100));
-            document.getElementById('mem-bar').style.width = memPct + '%';
-            document.getElementById('mem-txt').innerText = formatTokens(mem) + ' tokens';
-            let diskPct = Math.min(100, Math.round(disk / 200000 * 100));
-            document.getElementById('disk-bar').style.width = diskPct + '%';
-            document.getElementById('disk-txt').innerText = formatBytes(disk);
-            document.getElementById('net-in').innerText = netIn;
-            document.getElementById('net-out').innerText = netOut;
-            document.getElementById('focus-win').innerText = win;
-        }
-        function setStatus(status) {
-            const banner = document.getElementById('center-status');
-            const dot = document.getElementById('header-dot');
-            const label = document.getElementById('header-label');
-            const core = document.getElementById('reactor-core');
-            const rings = document.querySelectorAll('.reactor-svg circle[class^="ring-"]');
-            if (!banner) return;
-            banner.innerText = 'CORE STATUS: ' + status;
-            label.innerText = status;
-            let color = '#00d4ff'; let speed = '25s';
-            banner.className = 'status-banner';
-            if (status === 'THINKING') { color = '#ffb703'; speed = '3s'; banner.className = 'status-banner thinking'; }
-            else if (status === 'LISTENING') { color = '#00f5d4'; speed = '8s'; banner.className = 'status-banner listening'; }
-            else if (status === 'SPEAKING') { color = '#00a8ff'; speed = '5s'; banner.className = 'status-banner speaking'; }
-            else if (status === 'OFFLINE' || status === 'RECONNECTING' || status === 'CONNECTING') {
-                color = '#ff4d4d'; speed = '60s'; banner.className = 'status-banner offline';
-            }
-            dot.style.background = color; dot.style.boxShadow = '0 0 10px ' + color;
-            if (core) { core.style.fill = color; core.style.filter = 'drop-shadow(0 0 15px ' + color + ')'; }
-            const rgb = color.startsWith('#') ? [
-                parseInt(color.slice(1,3),16), parseInt(color.slice(3,5),16), parseInt(color.slice(5,7),16)
-            ] : [0,212,255];
-            rings.forEach(r => r.style.stroke = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.3)`);
-            rings.forEach(r => r.style.animationDuration = speed);
-        }
-        function showToast(msg, type='info') {
-            const c = document.getElementById('toast-container');
-            if (!c) return;
-            const t = document.createElement('div');
-            t.className = 'toast ' + type; t.innerText = msg;
-            c.appendChild(t);
-            requestAnimationFrame(() => t.classList.add('show'));
-            setTimeout(() => { t.classList.remove('show'); setTimeout(() => t.remove(), 400); }, 4000);
-        }
-        function appendLog(sender, text, stream=false) {
-            const area = document.getElementById('log-area');
-            if (!area) return;
-            if (sender === 'JARVIS' && activeJarvisMsg && stream) {
-                jarvisBuffer += text;
-                activeJarvisMsg.querySelector('.msg-body').innerHTML = md(jarvisBuffer);
-                activeJarvisMsg.querySelectorAll('pre code').forEach(b => {
-                    if (!b.dataset.hl) { hljs.highlightElement(b); b.dataset.hl = '1'; addCopyBtn(b); }
-                });
-                if (!userScrolled) area.scrollTop = area.scrollHeight;
-                return;
-            }
-            const div = document.createElement('div');
-            const t = new Date().toTimeString().split(' ')[0];
-            let cls = 'msg'; let sname = ''; let scolor = '';
-            if (sender === 'YOU') { cls += ' msg-user'; sname = 'OPERATOR'; scolor = '#ffb703'; activeJarvisMsg = null; jarvisBuffer = ''; }
-            else if (sender === 'JARVIS') { cls += ' msg-jarvis'; sname = 'J.A.R.V.I.S.'; scolor = '#00d4ff'; }
-            else if (sender === 'SYSTEM') { cls += ' msg-system'; sname = 'SYSTEM'; scolor = '#ff4d4d'; activeJarvisMsg = null; jarvisBuffer = ''; }
-            else { cls += ' msg-action'; sname = 'SYSTEM'; scolor = '#00f5d4'; activeJarvisMsg = null; jarvisBuffer = ''; }
-            div.className = cls;
-            const bodyHtml = sender === 'JARVIS' ? md(text) : (sender === 'ACTION' ? '>> ' + esc(text) : esc(text));
-            div.innerHTML = `<div class="msg-header"><span class="msg-sender" style="color:${scolor}">${sname}</span><span class="msg-time">${t}</span></div><div class="msg-body">${bodyHtml}</div>`;
-            if (sender === 'JARVIS') {
-                activeJarvisMsg = div; jarvisBuffer = text;
-                div.querySelectorAll('pre code').forEach(b => { hljs.highlightElement(b); b.dataset.hl = '1'; addCopyBtn(b); });
-            }
-            area.appendChild(div);
-            if (!userScrolled) area.scrollTop = area.scrollHeight;
-        }
-        function sendCmd() {
-            const inp = document.getElementById('cmd-input');
-            const v = inp.value.trim(); if (!v) return;
-            cmdHistory.push(v); cmdIndex = cmdHistory.length;
-            appendLog('YOU', v); inp.value = ''; setStatus('THINKING');
-            if (bridge) bridge.submitCommand(v);
-        }
-        function changeModel(m) {
-            if (bridge) { bridge.changeModel(m); appendLog('ACTION', 'Rerouting neural path to ' + m + '...'); setStatus('RECONNECTING'); }
-        }
-        function toggleVoice(on) {
-            const btn = document.getElementById('mic-btn');
-            if (bridge) bridge.setVoiceModeEnabled(on.toString());
-            if (on) {
-                btn.disabled = false; btn.classList.remove('mic-btn-inactive');
-                appendLog('ACTION', 'Voice synthesis enabled.'); setStatus('READY');
-            } else {
-                if (micOn) toggleMic();
-                btn.disabled = true; btn.classList.add('mic-btn-inactive');
-                appendLog('ACTION', 'Voice synthesis disabled.'); setStatus('READY');
-            }
-        }
-        function toggleMic() {
-            micOn = !micOn; const btn = document.getElementById('mic-btn'); const sp = btn.querySelector('span');
-            if (bridge) bridge.setMicActive(micOn);
-            if (micOn) { btn.classList.add('mic-active'); sp.innerText = 'LISTENING'; setStatus('LISTENING'); appendLog('ACTION', 'Audio capture active.'); }
-            else { btn.classList.remove('mic-active'); sp.innerText = 'MIC'; setStatus('READY'); appendLog('ACTION', 'Audio capture terminated.'); }
-        }
-        function reconnectCore() {
-            if (bridge) { bridge.triggerReconnect(); appendLog('ACTION', 'Re-establishing neural link...'); setStatus('RECONNECTING'); }
-        }
-        function resetCore() {
-            if (bridge) { bridge.resetSession(); appendLog('ACTION', 'Neural matrix reset initiated.'); setStatus('RECONNECTING'); }
-        }
-        function clearLog() { document.getElementById('log-area').innerHTML = ''; appendLog('ACTION', 'Log buffer purged.'); }
-        function updateModelBadge(model, isFallback) {
-            const sel = document.getElementById('model-select');
-            const badge = document.getElementById('model-badge');
-            if (sel) sel.value = model;
-            if (badge) { badge.innerText = isFallback ? 'FALLBACK' : ''; badge.style.display = isFallback ? 'inline-block' : 'none'; }
-        }
-        function updateAudioLevel(level) {
-            const canvas = document.getElementById('audio-viz');
-            if (!canvas) return;
-            const ctx = canvas.getContext('2d');
-            const w = canvas.width, h = canvas.height;
-            ctx.clearRect(0, 0, w, h);
-            const bars = 30; const gap = 2; const barW = (w - (bars - 1) * gap) / bars;
-            for (let i = 0; i < bars; i++) {
-                const decay = Math.abs(Math.sin(Date.now() / 200 + i)) * 0.5 + 0.5;
-                const height = Math.min(h, level * h * decay * 1.5);
-                const x = i * (barW + gap);
-                const y = h - height;
-                const grad = ctx.createLinearGradient(0, y, 0, h);
-                grad.addColorStop(0, 'rgba(0,212,255,0.9)');
-                grad.addColorStop(1, 'rgba(0,212,255,0.1)');
-                ctx.fillStyle = grad;
-                ctx.fillRect(x, y, barW, height);
-            }
-        }
+    const cpuBar = document.getElementById('cpu-bar');
+    const cpuTxt = document.getElementById('cpu-txt');
+    if (cpuBar) cpuBar.style.width = Math.min(100, cpu || 0) + '%';
+    if (cpuTxt) cpuTxt.innerText = (cpu === undefined || cpu === null ? '--' : cpu) + '%';
 
-        document.addEventListener('keydown', (e) => {
-            const inp = document.getElementById('cmd-input');
-            if (document.activeElement === inp) {
-                if (e.key === 'Enter') { e.preventDefault(); sendCmd(); }
-                if (e.key === 'ArrowUp') {
-                    e.preventDefault();
-                    if (cmdIndex > 0) { cmdIndex--; inp.value = cmdHistory[cmdIndex]; }
-                }
-                if (e.key === 'ArrowDown') {
-                    e.preventDefault();
-                    if (cmdIndex < cmdHistory.length - 1) { cmdIndex++; inp.value = cmdHistory[cmdIndex]; }
-                    else { cmdIndex = cmdHistory.length; inp.value = ''; }
-                }
-                if (e.key === 'Escape') { inp.value = ''; }
-            }
-        });
+    const memBar = document.getElementById('mem-bar');
+    const memTxt = document.getElementById('mem-txt');
+    let memPct = Math.min(100, Math.round((mem || 0) / 100000 * 100));
+    if (memBar) memBar.style.width = memPct + '%';
+    if (memTxt) memTxt.innerText = formatTokens(mem || 0) + ' tokens';
 
-        document.getElementById('log-area').addEventListener('scroll', (e) => {
-            const el = e.target;
-            userScrolled = el.scrollHeight - el.scrollTop - el.clientHeight > 50;
-        });
+    const diskBar = document.getElementById('disk-bar');
+    const diskTxt = document.getElementById('disk-txt');
+    let diskPct = Math.min(100, Math.round((disk || 0) / 200000 * 100));
+    if (diskBar) diskBar.style.width = diskPct + '%';
+    if (diskTxt) diskTxt.innerText = formatBytes(disk || 0);
 
-        function initBridge() {
-            if (typeof qt === "undefined" || !qt.webChannelTransport) {
-                setTimeout(initBridge, 200);
-                return;
-            }
-            new QWebChannel(qt.webChannelTransport, function(ch) {
-                bridge = ch.objects.pyBridge;
-                bridge.logReceived.connect((s, t) => appendLog(s, t, s==='JARVIS'));
-                bridge.statusUpdated.connect((s) => setStatus(s));
-                bridge.telemetryUpdated.connect((c, m, d, ni, no, w) => updateStats(c, m, d, ni, no, w));
-                bridge.modelSwitched.connect((m, f) => updateModelBadge(m, f));
-                bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
-                bridge.toastReceived.connect((m, t) => showToast(m, t));
-                setStatus('READY');
-                setBootDone();
-                bridge.onBridgeReady();
-            });
+    const nIn = document.getElementById('net-in');
+    const nOut = document.getElementById('net-out');
+    const fWin = document.getElementById('focus-win');
+    if (nIn) nIn.innerText = netIn || '0.0 B/s';
+    if (nOut) nOut.innerText = netOut || '0.0 B/s';
+    if (fWin) fWin.innerText = win || 'System Idle';
+}
+
+function initBridge() {
+    if (typeof qt === "undefined" || !qt.webChannelTransport) {
+        setTimeout(initBridge, 200);
+        return;
+    }
+    new QWebChannel(qt.webChannelTransport, function(ch) {
+        bridge = ch.objects.pyBridge;
+        if (!bridge) {
+            setTimeout(initBridge, 200);
+            return;
         }
+        bridge.logReceived.connect((s, t) => appendLog(s, t, s==='JARVIS'));
+        bridge.statusUpdated.connect((s) => setStatus(s));
+        bridge.telemetryUpdated.connect((c, m, d, ni, no, w) => updateStats(c, m, d, ni, no, w));
+        bridge.modelSwitched.connect((m, f) => updateModelBadge(m, f));
+        bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
+        bridge.toastReceived.connect((m, t) => showToast(m, t));
+        setStatus('READY');
+        setBootDone();
+        bridge.onBridgeReady();
+    });
+}
 
         document.addEventListener('DOMContentLoaded', function() {
             initBridge();
@@ -1053,6 +924,29 @@ class PyBridge(QObject):
 # ==========================================
 # CORE INTELLIGENCE
 # ==========================================
+class ResponseWatchdog:
+    def __init__(self, timeout: float, callback: Callable):
+        self.timeout = timeout
+        self.callback = callback
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self):
+        self.stop()
+        self._task = asyncio.create_task(self._run())
+
+    def stop(self):
+        if self._task:
+            self._task.cancel()
+            self._task = None
+
+    async def _run(self):
+        try:
+            await asyncio.sleep(self.timeout)
+            self.callback()
+        except asyncio.CancelledError:
+            pass
+
+
 class JarvisCore:
     def __init__(self, bridge: PyBridge):
         self.bridge = bridge
@@ -1090,6 +984,8 @@ class JarvisCore:
         if self._api_key:
             self.client = genai.Client(api_key=self._api_key)
 
+        self.watchdog = ResponseWatchdog(30.0, self._on_watchdog_timeout)
+
         self.thread.start()
 
     def _run_loop(self):
@@ -1101,9 +997,9 @@ class JarvisCore:
 
     async def _main_loop(self):
         self.set_state("BOOT")
-        await asyncio.sleep(1.5)
+        await asyncio.sleep(1.0)
         if not self.client:
-            self._emit_log("SYSTEM", "API Key not found. Please configure api_keys.json or set GEMINI_API_KEY.")
+            self._emit_log("SYSTEM", "API Key not found. Configure api_keys.json or GEMINI_API_KEY env var.")
             self.set_state("OFFLINE")
             return
         await self._connect_pipeline()
@@ -1122,6 +1018,11 @@ class JarvisCore:
 
     def _on_audio_level(self, level: float):
         self.bridge.audioLevelUpdated.emit(level)
+
+    def _on_watchdog_timeout(self):
+        if self.get_state() == "THINKING":
+            self._emit_log("SYSTEM", "Neural response timeout. Link may be congested or model is unresponsive.")
+            self.set_state("READY")
 
     def _load_api_key(self):
         if API_CONFIG_PATH.exists():
@@ -1149,30 +1050,72 @@ class JarvisCore:
             self.context_chars -= len(txt)
             self.context_tokens -= max(1, len(txt) // 4)
 
+    def _extract_text(self, response) -> str:
+        """Extract visible text from every possible SDK location."""
+        chunks = []
+
+        # 1. Official transcription (preferred)
+        if hasattr(response, 'server_content') and response.server_content:
+            sc = response.server_content
+            if hasattr(sc, 'output_transcription') and sc.output_transcription:
+                try:
+                    t = sc.output_transcription.text
+                    if t:
+                        chunks.append(t)
+                except Exception:
+                    pass
+
+            # 2. Model turn parts (fallback for older SDKs)
+            if hasattr(sc, 'model_turn') and sc.model_turn:
+                for part in sc.model_turn.parts:
+                    try:
+                        if hasattr(part, 'text') and part.text:
+                            chunks.append(part.text)
+                    except Exception:
+                        pass
+
+        # 3. Top-level response text (nuclear fallback)
+        try:
+            if hasattr(response, 'text') and response.text:
+                chunks.append(response.text)
+        except Exception:
+            pass
+
+        return " ".join(chunks)
+
     def dispatch_text(self, text: str):
         self._emit_log("YOU", text)
         with self._response_lock:
             self._response_buffer = ""
+
         if not self.session_ready.is_set() or not self.session:
             self.pending_messages.append(text)
             self._emit_log("SYSTEM", "Connection unstable. Command buffered for re-link.")
             return
+
         self._add_history("user", text)
-        asyncio.run_coroutine_threadsafe(
-            self.session.send_client_content(
-                turns=[types.Content(parts=[types.Part.from_text(text=text)], role='user')],
-                turn_complete=True
-            ), self.loop
+        coro = self.session.send_client_content(
+            turns=[types.Content(parts=[types.Part.from_text(text=text)], role='user')],
+            turn_complete=True
         )
+        asyncio.run_coroutine_threadsafe(self._safe_send(coro, "Message transmit"), self.loop)
         self.set_state("THINKING")
+        self.watchdog.start()
+
+    async def _safe_send(self, coro, desc: str = "send"):
+        try:
+            await coro
+        except Exception as e:
+            self._emit_log("SYSTEM", f"{desc} failed: {str(e)[:100]}")
+            self.watchdog.stop()
+            self.set_state("READY")
 
     def send_audio_chunk(self, data: bytes):
         if self.session and self.session_ready.is_set() and self.mic_active and not self._shutdown:
-            asyncio.run_coroutine_threadsafe(
-                self.session.send_realtime_input(
-                    media=types.Blob(mime_type="audio/pcm;rate=16000", data=data)
-                ), self.loop
+            coro = self.session.send_realtime_input(
+                media=types.Blob(mime_type="audio/pcm;rate=16000", data=data)
             )
+            asyncio.run_coroutine_threadsafe(self._safe_send(coro, "Audio transmit"), self.loop)
 
     def set_voice_mode(self, enabled: bool):
         self.voice_enabled = enabled
@@ -1189,9 +1132,7 @@ class JarvisCore:
                     on_data=self.send_audio_chunk,
                     on_level=self._on_audio_level
                 )
-                self.audio_recorder.start()
-            else:
-                self.audio_recorder.start()
+            self.audio_recorder.start()
         else:
             if self.audio_recorder:
                 self.audio_recorder.stop()
@@ -1237,6 +1178,7 @@ class JarvisCore:
 
     def stop(self):
         self._shutdown = True
+        self.watchdog.stop()
         self.audio_player.stop()
         if self.audio_recorder:
             self.audio_recorder.stop()
@@ -1274,12 +1216,12 @@ class JarvisCore:
                     self.session = session
                     self.session_ready.set()
 
-                    # Context restoration
-                    if self.history and not self.resumption_token:
+                    # Context restoration (only on reconnect with token, otherwise start fresh)
+                    if self.history and self.resumption_token:
                         try:
-                            context_turns = self.history[-MAX_HISTORY:]
-                            await session.send_client_content(turns=context_turns, turn_complete=False)
-                            self._emit_log("SYSTEM", f"Context restored: {len(context_turns)} turns.")
+                            ctx = self.history[-MAX_HISTORY:]
+                            await session.send_client_content(turns=ctx, turn_complete=False)
+                            self._emit_log("SYSTEM", f"Context restored: {len(ctx)} turns.")
                         except Exception as e:
                             self._emit_log("SYSTEM", f"Context restore warning: {str(e)[:80]}")
 
@@ -1310,7 +1252,7 @@ class JarvisCore:
             err_type = "SERVER"
 
         if err_type == "AUTH":
-            self._emit_log("SYSTEM", f"Authentication failed. Check your API key. ({str(e)[:60]})")
+            self._emit_log("SYSTEM", f"Authentication failed. Check API key. ({str(e)[:60]})")
             self.set_state("OFFLINE")
             await self._wait_shutdown(30)
             return
@@ -1323,7 +1265,7 @@ class JarvisCore:
                 self.current_model_idx = 0
                 self.retry_cycle += 1
                 if self.retry_cycle >= 3:
-                    self._emit_log("SYSTEM", "All neural paths exhausted. Entering hibernation mode.")
+                    self._emit_log("SYSTEM", "All neural paths exhausted. Entering hibernation.")
                     self.set_state("OFFLINE")
                     await self._wait_shutdown(30)
                     self.retry_cycle = 0
@@ -1332,11 +1274,12 @@ class JarvisCore:
             self.reconnect_backoff = 1.0
         else:
             self.reconnect_backoff = min(self.reconnect_backoff * 2, self.max_backoff)
+            if self.resumption_token and "resumption" in err:
+                self.resumption_token = None
             self._emit_log("SYSTEM", f"Connection anomaly: {str(e)[:60]}. Re-linking in {self.reconnect_backoff:.1f}s...")
 
         self.session = None
         self.session_ready.clear()
-
         jitter = random.uniform(0, 1.0)
         await asyncio.sleep(self.reconnect_backoff + jitter)
 
@@ -1352,13 +1295,12 @@ class JarvisCore:
         while self.pending_messages:
             msg = self.pending_messages.pop(0)
             self._add_history("user", msg)
+            coro = self.session.send_client_content(
+                turns=[types.Content(parts=[types.Part.from_text(text=msg)], role='user')],
+                turn_complete=True
+            )
             try:
-                asyncio.run_coroutine_threadsafe(
-                    self.session.send_client_content(
-                        turns=[types.Content(parts=[types.Part.from_text(text=msg)], role='user')],
-                        turn_complete=True
-                    ), self.loop
-                )
+                asyncio.run_coroutine_threadsafe(self._safe_send(coro, "Flush transmit"), self.loop)
             except Exception:
                 self.pending_messages.insert(0, msg)
                 break
@@ -1371,39 +1313,44 @@ class JarvisCore:
                 if new_handle:
                     self.resumption_token = new_handle
 
-            if hasattr(response, 'server_content') and response.server_content:
-                sc = response.server_content
+            if not (hasattr(response, 'server_content') and response.server_content):
+                return
 
-                # Audio playback
-                if hasattr(sc, 'model_turn') and sc.model_turn:
-                    for part in sc.model_turn.parts:
-                        if hasattr(part, 'inline_data') and part.inline_data and part.inline_data.data:
-                            if self.voice_enabled:
-                                self.set_state("SPEAKING")
-                                self.audio_player.feed(part.inline_data.data)
+            sc = response.server_content
 
-                # Text transcription (streaming)
-                if hasattr(sc, 'output_transcription') and sc.output_transcription:
-                    text = sc.output_transcription.text
-                    if text:
-                        with self._response_lock:
-                            self._response_buffer += text
-                        self._emit_log("JARVIS", text)
+            # Audio playback
+            if hasattr(sc, 'model_turn') and sc.model_turn:
+                for part in sc.model_turn.parts:
+                    if hasattr(part, 'inline_data') and part.inline_data and getattr(part.inline_data, 'data', None):
+                        if self.voice_enabled:
+                            self.set_state("SPEAKING")
+                            self.audio_player.feed(part.inline_data.data)
 
-                # Turn complete
-                if getattr(sc, 'turn_complete', False):
-                    with self._response_lock:
-                        if self._response_buffer:
-                            final = self._response_buffer.strip()
-                            self._add_history("model", final)
-                            self._response_buffer = ""
-                    self.set_state("READY")
+            # Text extraction (multi-source)
+            text = self._extract_text(response)
+            if text:
+                with self._response_lock:
+                    self._response_buffer += text
+                self._emit_log("JARVIS", text)
+                self.watchdog.stop()
+                self.watchdog.start()
+
+            # Turn complete
+            if getattr(sc, 'turn_complete', False):
+                self.watchdog.stop()
+                with self._response_lock:
+                    if self._response_buffer:
+                        final = self._response_buffer.strip()
+                        self._add_history("model", final)
+                        self._response_buffer = ""
+                self.set_state("READY")
 
             # Tool calls
             if hasattr(response, 'tool_call') and response.tool_call:
                 calls = response.tool_call.function_calls
                 if calls:
                     self.set_state("THINKING")
+                    self.watchdog.start()
                     with self._response_lock:
                         if self._response_buffer:
                             self._add_history("model", self._response_buffer.strip())
@@ -1411,11 +1358,14 @@ class JarvisCore:
                     for call in calls:
                         await self._execute_tool(call)
                     self.set_state("READY")
+                    self.watchdog.stop()
 
         except Exception as e:
             import traceback
             self._emit_log("SYSTEM", f"Response processing error: {e}")
             traceback.print_exc()
+            self.watchdog.stop()
+            self.set_state("READY")
 
     async def _execute_tool(self, call):
         name = call.name
