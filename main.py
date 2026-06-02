@@ -2848,8 +2848,16 @@ def _web_search_ddg(query: str, max_results: int = 5) -> str:
     """Search DuckDuckGo HTML endpoint (no API key) and return top results."""
     max_results = max(1, min(_SEARCH_MAX_RESULTS, int(max_results or 5)))
     url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    # DuckDuckGo bot-blocks generic UAs; use a browser UA only for the search.
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/120.0.0.0 Safari/537.36"},
+    )
     try:
-        html_text = _http_get_text(url, timeout=_HTTP_TIMEOUT)
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            html_text = resp.read(_FETCH_MAX_BYTES).decode("utf-8", errors="replace")
     except Exception as e:
         return f"Search failed: {e}"
 
@@ -2926,7 +2934,8 @@ def _get_definition(word: str) -> str:
         return f"'{word}' is not a valid English word to look up."
     url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{urllib.parse.quote(word)}"
     try:
-        data = _http_get_json(url, timeout=_HTTP_TIMEOUT)
+        raw = _http_get_text(url, timeout=_HTTP_TIMEOUT)
+        data = json.loads(raw) if raw else None
     except urllib.error.HTTPError as e:
         if e.code == 404:
             return f"No definition found for '{word}'."
@@ -2971,7 +2980,8 @@ def _translate_text(text: str, target_lang: str, source_lang: str = "en") -> str
         + urllib.parse.urlencode({"q": text, "langpair": f"{source}|{target}"})
     )
     try:
-        data = _http_get_json(url, timeout=_HTTP_TIMEOUT)
+        raw = _http_get_text(url, timeout=_HTTP_TIMEOUT)
+        data = json.loads(raw) if raw else {}
     except Exception as e:
         return f"Translation failed: {e}"
     response = data.get("responseData") or {}
@@ -3001,7 +3011,9 @@ def _safe_eval_math(expr: str) -> str:
     for node in ast.walk(tree):
         if isinstance(node, ast.Expression):
             continue
-        elif isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Load)):
+        elif isinstance(node, (ast.BinOp, ast.UnaryOp, ast.Load,
+                               ast.Add, ast.Sub, ast.Mult, ast.Div, ast.FloorDiv,
+                               ast.Mod, ast.Pow, ast.USub, ast.UAdd)):
             continue
         elif isinstance(node, ast.Constant):
             if not isinstance(node.value, (int, float)):
