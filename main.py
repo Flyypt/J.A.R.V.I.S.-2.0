@@ -413,11 +413,10 @@ UI_HTML = """
                 linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
             background-size: 100% 100%, 50px 50px, 50px 50px;
         }
-        body::after {
-            content: ''; position: absolute; inset: 0;
-            background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,0.15) 2px, rgba(0,0,0,0.15) 4px);
-            pointer-events: none; z-index: 999; opacity: 0.3;
-        }
+        /* Note: the body::after horizontal scanline overlay was removed
+           during the Tony Stark UI upgrade — the static repeating-line
+           pattern felt cramped. The radial gradient vignette on body
+           itself provides all the depth the eye needs. */
 
         /* Boot */
         #boot-overlay {
@@ -505,6 +504,27 @@ UI_HTML = """
             background: linear-gradient(90deg, transparent, var(--jarvis-cyan), transparent);
             opacity: 0.3;
         }
+        /* Subtle sci-fi corner brackets on every panel. ::before is used for
+           the top accent line above, so we use ::after for the four corners.
+           Each corner is drawn as two 18px lines (horizontal + vertical)
+           layered on top of the panel — no extra DOM, no clutter. */
+        .hud-panel::after {
+            content: ''; position: absolute; inset: 0; pointer-events: none;
+            background:
+                /* top-left: H-line + V-line */
+                linear-gradient(180deg, rgba(0,212,255,0.55) 0 1px, transparent 1px) top left / 18px 1px no-repeat,
+                linear-gradient(90deg,  rgba(0,212,255,0.55) 0 1px, transparent 1px) top left / 1px 18px no-repeat,
+                /* top-right: H-line + V-line */
+                linear-gradient(180deg, rgba(0,212,255,0.55) 0 1px, transparent 1px) top right / 18px 1px no-repeat,
+                linear-gradient(270deg, rgba(0,212,255,0.55) 0 1px, transparent 1px) top right / 1px 18px no-repeat,
+                /* bottom-left: H-line + V-line */
+                linear-gradient(0deg,   rgba(0,212,255,0.55) 0 1px, transparent 1px) bottom left / 18px 1px no-repeat,
+                linear-gradient(90deg,  rgba(0,212,255,0.55) 0 1px, transparent 1px) bottom left / 1px 18px no-repeat,
+                /* bottom-right: H-line + V-line */
+                linear-gradient(0deg,   rgba(0,212,255,0.55) 0 1px, transparent 1px) bottom right / 18px 1px no-repeat,
+                linear-gradient(270deg, rgba(0,212,255,0.55) 0 1px, transparent 1px) bottom right / 1px 18px no-repeat;
+            filter: drop-shadow(0 0 3px rgba(0, 212, 255, 0.35));
+        }
         .panel-label {
             font-family: var(--font-display); font-size: 10px; letter-spacing: 3px;
             color: var(--jarvis-cyan); margin-bottom: 16px; padding-bottom: 8px;
@@ -544,23 +564,48 @@ UI_HTML = """
 
         /* Center */
         #center-panel { align-items: center; justify-content: center; position: relative; }
+
+        /* Arc reactor:
+           - .reactor-wrap centers the SVG (200x200 viewBox) in the panel.
+           - .reactor-svg has a soft cyan drop-shadow glow.
+           - 4 rotating concentric rings + 4 static thin guide circles;
+             adjacent rings spin opposite directions for the orbital-
+             mechanics look:
+               * .ring-hex    (r=90)  — fine dashed,   rotates CCW (35s, slow)
+               * .ring-outer  (r=82)  — medium dashed, rotates CW  (25s)
+               * .ring-mid    (r=64)  — tight dashed,  rotates CCW (18s)
+               * .ring-inner  (r=46)  — long-dash,     rotates CW  (12s, fast)
+           - .core-glow is the pulsing radial-gradient central orb.
+           - Core fill + ring stroke colors swap with JARVIS state
+             (cyan/amber/teal/red) — driven by setStatus() in JS. */
         .reactor-wrap {
-            width: 300px; height: 300px; position: relative; display: flex; align-items: center; justify-content: center;
+            width: 300px; height: 300px; position: relative;
+            display: flex; align-items: center; justify-content: center;
         }
         .reactor-svg {
-            width: 100%; height: 100%; filter: drop-shadow(0 0 25px rgba(0, 212, 255, 0.3));
+            width: 100%; height: 100%;
+            filter: drop-shadow(0 0 25px rgba(0, 212, 255, 0.3));
         }
-        .ring-outer { transform-origin: center; animation: spin-cw 25s linear infinite; }
-        .ring-mid { transform-origin: center; animation: spin-ccw 18s linear infinite; }
-        .ring-inner { transform-origin: center; animation: spin-cw 12s linear infinite; }
-        .ring-hex { transform-origin: center; animation: spin-ccw 35s linear infinite; }
-        .core-glow { transform-origin: center; animation: core-pulse 3s ease-in-out infinite; }
-        @keyframes spin-cw { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-        @keyframes spin-ccw { from { transform: rotate(0deg); } to { transform: rotate(-360deg); } }
+        .ring-outer, .ring-mid, .ring-inner, .ring-hex {
+            transform-origin: 100px 100px;
+        }
+        .ring-hex   { animation: spin-ccw 35s linear infinite; }
+        .ring-outer { animation: spin-cw  25s linear infinite; }
+        .ring-mid   { animation: spin-ccw 18s linear infinite; }
+        .ring-inner { animation: spin-cw  12s linear infinite; }
+        .core-glow  {
+            transform-origin: 100px 100px;
+            animation: core-pulse 3s ease-in-out infinite;
+        }
+
+        /* Counter-rotation keyframes + pulsing core. */
+        @keyframes spin-cw  { from { transform: rotate(0deg); }   to { transform: rotate(360deg);  } }
+        @keyframes spin-ccw { from { transform: rotate(0deg); }   to { transform: rotate(-360deg); } }
         @keyframes core-pulse {
-            0%, 100% { transform: scale(1); opacity: 0.7; }
-            50% { transform: scale(1.15); opacity: 1; }
+            0%, 100% { transform: scale(1);    opacity: 0.7; }
+            50%      { transform: scale(1.15); opacity: 1;   }
         }
+
         #audio-viz {
             position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
             width: 260px; height: 60px; opacity: 0.8; pointer-events: none;
@@ -618,6 +663,30 @@ UI_HTML = """
         .msg-action .msg-sender { color: #00f5d4; }
         .msg-action .msg-body { color: #00f5d4; font-family: var(--font-mono); font-size: 11px; }
 
+        /* Typing indicator — three pulsing dots that show in the chat
+           footer while JARVIS is thinking. Sits below the scrollable
+           #log-area, so it stays pinned to the bottom of the right panel
+           without consuming scroll space inside the log itself. */
+        .typing-indicator {
+            display: none; align-items: center; gap: 6px;
+            padding: 10px 4px 2px; font-family: var(--font-display);
+            font-size: 10px; letter-spacing: 2px; color: var(--text-dim);
+            border-top: 1px dashed transparent; margin-top: 6px;
+        }
+        .typing-indicator.show { display: flex; color: var(--jarvis-cyan); }
+        .typing-indicator .label { opacity: 0.75; }
+        .typing-dot {
+            width: 6px; height: 6px; background: var(--jarvis-cyan); border-radius: 50%;
+            box-shadow: 0 0 6px var(--jarvis-cyan);
+            animation: typing-pulse 1.4s ease-in-out infinite;
+        }
+        .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+        .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes typing-pulse {
+            0%, 60%, 100% { opacity: 0.3; transform: scale(0.85); }
+            30% { opacity: 1; transform: scale(1.2); }
+        }
+
         /* Footer */
         footer {
             padding: 14px 24px; background: rgba(2, 8, 18, 0.95);
@@ -634,6 +703,13 @@ UI_HTML = """
         #cmd-input:focus {
             border-color: var(--jarvis-cyan);
             box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), 0 0 15px rgba(0, 212, 255, 0.15);
+            animation: cmd-focus-pulse 2.4s ease-in-out infinite;
+        }
+        /* Subtle pulsing focus glow on the command input — gives the field
+           a "scanning" feel without adding any extra elements or DOM. */
+        @keyframes cmd-focus-pulse {
+            0%, 100% { box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), 0 0 0 1px rgba(0, 212, 255, 0.25), 0 0 18px rgba(0, 212, 255, 0.18); }
+            50%      { box-shadow: inset 0 2px 8px rgba(0,0,0,0.5), 0 0 0 1px rgba(0, 212, 255, 0.45), 0 0 28px rgba(0, 212, 255, 0.35); }
         }
         .exec-btn {
             background: rgba(0, 212, 255, 0.1); border: 1px solid var(--jarvis-cyan);
@@ -881,6 +957,42 @@ function initBridge() {
                 const colors = {OFFLINE: '#ff4d4d', THINKING: '#ffb703', SPEAKING: '#00a8ff', LISTENING: '#00f5d4'};
                 dot.style.background = colors[s] || 'var(--jarvis-cyan)';
             }
+            // Drive reactor state class so panel-level state-* rules
+            // (drop-shadow, etc.) follow the JARVIS state. State comes
+            // in uppercase (THINKING, SPEAKING, etc.) so we lowercase it.
+            const center = document.getElementById('center-panel');
+            if (center) {
+                center.className = 'hud-panel state-' + s.toLowerCase();
+            }
+            // Recolor the reactor: swap the core's fill + drop-shadow and
+            // tint all four rotating rings, plus adjust rotation speed so
+            // the orbital animation reflects current activity.
+            const core = document.getElementById('reactor-core');
+            const rings = document.querySelectorAll('.reactor-svg circle[class^="ring-"]');
+            const reactorPalette = {
+                THINKING:    { color: '#ffb703', speed: '3s'  },
+                LISTENING:   { color: '#00f5d4', speed: '8s'  },
+                SPEAKING:    { color: '#00a8ff', speed: '5s'  },
+                OFFLINE:     { color: '#ff4d4d', speed: '60s' },
+                RECONNECTING:{ color: '#ff4d4d', speed: '60s' },
+            };
+            const cfg = reactorPalette[s] || { color: '#00d4ff', speed: '25s' };
+            if (core) {
+                core.style.fill = cfg.color;
+                core.style.filter = 'drop-shadow(0 0 15px ' + cfg.color + ')';
+            }
+            const hex = cfg.color.replace('#','');
+            const rgb = [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16), parseInt(hex.slice(4,6),16)];
+            rings.forEach(r => {
+                r.style.stroke = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.3)`;
+                r.style.animationDuration = cfg.speed;
+            });
+            // Show the 3-dot typing indicator while the model is thinking.
+            // Auto-hides when JARVIS starts speaking or returns to ready.
+            const typing = document.getElementById('typing-indicator');
+            if (typing) {
+                typing.classList.toggle('show', s === 'THINKING');
+            }
         }
 
         function updateModelBadge(model, fallback) {
@@ -1036,6 +1148,8 @@ function initBridge() {
                             <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
                         </radialGradient>
                     </defs>
+
+                    <!-- Outer rings -->
                     <circle cx="100" cy="100" r="95" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="1" />
                     <circle cx="100" cy="100" r="90" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1.5" stroke-dasharray="4 8" class="ring-hex" />
                     <circle cx="100" cy="100" r="82" fill="none" stroke="rgba(0,212,255,0.2)" stroke-width="2" stroke-dasharray="10 14" class="ring-outer" />
@@ -1044,8 +1158,12 @@ function initBridge() {
                     <circle cx="100" cy="100" r="54" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1" />
                     <circle cx="100" cy="100" r="46" fill="none" stroke="rgba(0,212,255,0.3)" stroke-width="2" stroke-dasharray="12 4" class="ring-inner" />
                     <circle cx="100" cy="100" r="36" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1" />
+
+                    <!-- Glowing core -->
                     <circle cx="100" cy="100" r="28" fill="url(#coreGrad)" class="core-glow" id="reactor-core" />
                     <circle cx="100" cy="100" r="14" fill="#fff" opacity="0.9" />
+
+                    <!-- Crosshairs -->
                     <line x1="100" y1="5" x2="100" y2="15" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
                     <line x1="100" y1="185" x2="100" y2="195" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
                     <line x1="5" y1="100" x2="15" y2="100" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
@@ -1058,6 +1176,12 @@ function initBridge() {
         <div class="hud-panel" id="right-panel">
             <div class="panel-label">NEURAL ACTIVITY <span>// COMMS</span></div>
             <div id="log-area"></div>
+            <div class="typing-indicator" id="typing-indicator">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <span class="label">PROCESSING</span>
+            </div>
         </div>
     </main>
     <footer>
