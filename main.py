@@ -92,7 +92,8 @@ import base64
 import difflib
 
 from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt
-from PyQt6.QtWidgets import QApplication, QMainWindow
+from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu, QFileDialog
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PyQt6.QtWebEngineCore import QWebEngineProfile
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
@@ -122,6 +123,11 @@ _setup_logging()
 
 # Config
 CONFIG_PATH = BASE_DIR / "jarvis_config.json"
+MODEL_POOL = [
+    "gemini-2.5-flash-native-audio-latest",
+    "gemini-2.0-flash-live-preview-04-09",
+]
+
 DEFAULT_CONFIG = {
     "gemini_api_key": "",
     "model": MODEL_POOL[0],
@@ -157,10 +163,6 @@ def save_config(cfg):
 
 API_CONFIG_PATH = BASE_DIR / "api_keys.json"
 
-MODEL_POOL = [
-    "gemini-2.5-flash-native-audio-latest",
-    "gemini-2.0-flash-live-preview-04-09",
-]
 
 MAX_HISTORY = 50
 MAX_PENDING = 50
@@ -2426,6 +2428,57 @@ class ResponseWatchdog:
             self.callback()
         except Exception as e:
             logger.error(f"[Watchdog] callback error: {e}")
+
+
+def _web_search_ddg(query: str, max_results: int = 5) -> str:
+    """Search DuckDuckGo HTML endpoint (no API key) and return top results."""
+    max_results = max(1, min(_SEARCH_MAX_RESULTS, int(max_results or 5)))
+    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
+    # DuckDuckGo bot-blocks generic UAs; use a browser UA only for the search.
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                 "AppleWebKit/537.36 (KHTML, like Gecko) "
+                 "Chrome/120.0.0.0 Safari/537.36"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
+            html_text = resp.read(_FETCH_MAX_BYTES).decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Search failed: {e}"
+
+    title_pat = re.compile(
+        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    snippet_pat = re.compile(
+        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
+        re.DOTALL,
+    )
+    tag_pat = re.compile(r"<[^>]+>")
+
+    titles = title_pat.findall(html_text)
+    snippets = snippet_pat.findall(html_text)
+
+    results = []
+    for i, (link, title_html) in enumerate(titles[:max_results]):
+        title = html.unescape(tag_pat.sub("", title_html)).strip()
+        if not title:
+            continue
+        snippet = ""
+        if i < len(snippets):
+            snippet = html.unescape(tag_pat.sub("", snippets[i])).strip()
+        # DuckDuckGo wraps result URLs in a redirector; unwrap uddg=... if present.
+        actual_url = link
+        m = re.search(r"uddg=([^&]+)", link)
+        if m:
+            actual_url = urllib.parse.unquote(m.group(1))
+        results.append(f"{len(results) + 1}. {title}\n   {actual_url}\n   {snippet}")
+
+    if not results:
+        return f"No results found for '{query}'."
+    return f"Top {len(results)} result(s) for '{query}':\n\n" + "\n\n".join(results)
+
 
 
 class JarvisCore:
@@ -4924,56 +4977,6 @@ def _format_size(n: int) -> str:
             return f"{n:.1f}{unit}" if unit != "B" else f"{n}B"
         n /= 1024.0
     return f"{n:.1f}PB"
-
-
-def _web_search_ddg(query: str, max_results: int = 5) -> str:
-    """Search DuckDuckGo HTML endpoint (no API key) and return top results."""
-    max_results = max(1, min(_SEARCH_MAX_RESULTS, int(max_results or 5)))
-    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    # DuckDuckGo bot-blocks generic UAs; use a browser UA only for the search.
-    req = urllib.request.Request(
-        url,
-        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                 "AppleWebKit/537.36 (KHTML, like Gecko) "
-                 "Chrome/120.0.0.0 Safari/537.36"},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as resp:
-            html_text = resp.read(_FETCH_MAX_BYTES).decode("utf-8", errors="replace")
-    except Exception as e:
-        return f"Search failed: {e}"
-
-    title_pat = re.compile(
-        r'<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>',
-        re.DOTALL,
-    )
-    snippet_pat = re.compile(
-        r'<a[^>]*class="result__snippet"[^>]*>(.*?)</a>',
-        re.DOTALL,
-    )
-    tag_pat = re.compile(r"<[^>]+>")
-
-    titles = title_pat.findall(html_text)
-    snippets = snippet_pat.findall(html_text)
-
-    results = []
-    for i, (link, title_html) in enumerate(titles[:max_results]):
-        title = html.unescape(tag_pat.sub("", title_html)).strip()
-        if not title:
-            continue
-        snippet = ""
-        if i < len(snippets):
-            snippet = html.unescape(tag_pat.sub("", snippets[i])).strip()
-        # DuckDuckGo wraps result URLs in a redirector; unwrap uddg=... if present.
-        actual_url = link
-        m = re.search(r"uddg=([^&]+)", link)
-        if m:
-            actual_url = urllib.parse.unquote(m.group(1))
-        results.append(f"{len(results) + 1}. {title}\n   {actual_url}\n   {snippet}")
-
-    if not results:
-        return f"No results found for '{query}'."
-    return f"Top {len(results)} result(s) for '{query}':\n\n" + "\n\n".join(results)
 
 
 def _fetch_url_text(url: str, max_chars: int = 8000) -> str:
