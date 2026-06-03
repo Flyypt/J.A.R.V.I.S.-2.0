@@ -1,1 +1,25 @@
+# J.A.R.V.I.S. runtime files
+jarvis_config.json
+jarvis.log
+.jarvis_backups/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# User data
 api_keys.json
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
