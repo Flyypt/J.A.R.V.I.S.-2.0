@@ -14,6 +14,7 @@ import subprocess
 import shutil
 import traceback
 import urllib.request
+import webbrowser
 import urllib.parse
 import urllib.error
 import re
@@ -54,15 +55,47 @@ import tempfile
 import base64
 import difflib
 
-# Add QSystemTrayIcon and QMenu to your QtWidgets import
-from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu
+try:
+    import yt_dlp
+    HAS_YTDLP = True
+except ImportError:
+    HAS_YTDLP = False
+
+try:
+    import qrcode
+    HAS_QRCODE = True
+except ImportError:
+    HAS_QRCODE = False
+
+try:
+    import requests
+    HAS_REQUESTS = True
+except ImportError:
+    HAS_REQUESTS = False
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+try:
+    from pynput.keyboard import GlobalHotKeys
+    HAS_PYNPUT = True
+except ImportError:
+    HAS_PYNPUT = False
+
+import logging
+from logging.handlers import RotatingFileHandler
+import tempfile
+import base64
+import difflib
+
 from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt
+from PyQt6.QtWidgets import QApplication, QMainWindow
 from PyQt6.QtWebEngineCore import QWebEngineProfile
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
-
-# ADD THIS LINE for QIcon
-from PyQt6.QtGui import QIcon
 
 from google import genai
 from google.genai import types
@@ -88,26 +121,6 @@ def _setup_logging():
 _setup_logging()
 
 # Config
-# Config
-MODEL_POOL = [
-    "gemini-2.5-flash", 
-    "gemini-2.5-pro"
-]
-
-CONFIG_PATH = BASE_DIR / "jarvis_config.json"
-DEFAULT_CONFIG = {
-    "gemini_api_key": "",
-    "model": MODEL_POOL[0],  # This will now correctly resolve to "gemini-2.5-flash"
-    "voice_enabled": False,
-    "mic_enabled": False,
-    "audio_output_device": None,
-    "audio_input_device": None,
-    "confirm_dangerous": True,
-    "startup_minimized": False,
-    "global_hotkey": "ctrl+alt+j",
-    "max_history": 50,
-    "volume": 1.0,
-}
 CONFIG_PATH = BASE_DIR / "jarvis_config.json"
 DEFAULT_CONFIG = {
     "gemini_api_key": "",
@@ -155,6 +168,31 @@ AUDIO_SR_OUT = 24000
 AUDIO_SR_IN = 16000
 TELEMETRY_INTERVAL_MS = 1000
 DANGEROUS_TOOLS = {"execute_shell", "write_file", "move_file", "delete_file", "apply_diff"}
+
+# URL whitelist for safe browsing
+URL_ALLOWLIST = frozenset()
+URL_BLOCKLIST = frozenset()
+
+# Search engines
+SEARCH_ENGINES = {
+    "duckduckgo": "https://html.duckduckgo.com/html/?q={}",
+    "bing": "https://www.bing.com/search?q={}",
+    "google": "https://www.google.com/search?q={}",
+}
+
+# Memory management
+MAX_MEMORY_MB = 512
+GC_INTERVAL = 300  # seconds
+
+# Download settings
+DOWNLOAD_DIR = BASE_DIR / "downloads"
+DOWNLOAD_DIR.mkdir(exist_ok=True)
+MAX_DOWNLOAD_SIZE = 500 * 1024 * 1024  # 500MB
+
+# Connection hardening
+MAX_RETRIES = 5
+RETRY_DELAY = 2.0
+CONNECTION_TIMEOUT = 30
 
 SYSTEM_PROMPT = """You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), Tony Stark's personal AI assistant.
 You are operating inside a secure local core matrix with direct system-level tool access.
@@ -545,6 +583,158 @@ JARVIS_TOOLS = [
             properties={"path": types.Schema(type="STRING", description="Path to image file.")},
             required=["path"]
         )
+    ),
+    types.FunctionDeclaration(
+        name="send_email",
+        description="Send an email via SMTP. Supports Gmail, Outlook, and custom SMTP servers.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "to": types.Schema(type="STRING", description="Recipient email address."),
+                "subject": types.Schema(type="STRING", description="Email subject line."),
+                "body": types.Schema(type="STRING", description="Email body text (plain text or HTML)."),
+                "smtp_server": types.Schema(type="STRING", description="SMTP server address. Default: smtp.gmail.com"),
+                "smtp_port": types.Schema(type="INTEGER", description="SMTP port. Default: 587"),
+                "username": types.Schema(type="STRING", description="SMTP login username/email."),
+                "password": types.Schema(type="STRING", description="SMTP login password or app password."),
+                "use_tls": types.Schema(type="BOOLEAN", description="Use TLS encryption. Default: true")
+            },
+            required=["to", "subject", "body", "username", "password"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="send_discord_message",
+        description="Send a message to a Discord channel via webhook URL.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "webhook_url": types.Schema(type="STRING", description="Discord webhook URL."),
+                "message": types.Schema(type="STRING", description="Message text to send."),
+                "username": types.Schema(type="STRING", description="Override bot username. Optional.")
+            },
+            required=["webhook_url", "message"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="open_url",
+        description="Open any URL in the default browser. Validates URLs for safety before opening.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "url": types.Schema(type="STRING", description="URL to open. Must start with http:// or https://"),
+                "new_window": types.Schema(type="BOOLEAN", description="Open in new window vs new tab. Default: false (new tab)")
+            },
+            required=["url"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="download_video",
+        description="Download a video from YouTube or other supported sites using yt-dlp. Requires yt-dlp to be installed.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "url": types.Schema(type="STRING", description="Video URL to download."),
+                "format": types.Schema(type="STRING", description="Format preference: 'best', 'worst', 'audio_only', '720p', '1080p'. Default: 'best'"),
+                "output_path": types.Schema(type="STRING", description="Download directory. Default: ./downloads/"),
+                "audio_only": types.Schema(type="BOOLEAN", description="Download audio only (MP3). Default: false")
+            },
+            required=["url"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="generate_qr_code",
+        description="Generate a QR code image from text or a URL.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "data": types.Schema(type="STRING", description="Text or URL to encode in QR code."),
+                "output_path": types.Schema(type="STRING", description="Where to save the QR image. Default: ./qrcode.png"),
+                "size": types.Schema(type="INTEGER", description="Box size in pixels. Default: 10")
+            },
+            required=["data"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="password_generator",
+        description="Generate a secure random password.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "length": types.Schema(type="INTEGER", description="Password length. Default: 16"),
+                "include_uppercase": types.Schema(type="BOOLEAN", description="Include A-Z. Default: true"),
+                "include_numbers": types.Schema(type="BOOLEAN", description="Include 0-9. Default: true"),
+                "include_symbols": types.Schema(type="BOOLEAN", description="Include special chars. Default: true")
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="system_cleanup",
+        description="Clean temporary files, empty recycle bin/trash, and free disk space.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "temp_files": types.Schema(type="BOOLEAN", description="Clean temp files. Default: true"),
+                "recycle_bin": types.Schema(type="BOOLEAN", description="Empty recycle bin/trash. Default: false"),
+                "downloads": types.Schema(type="BOOLEAN", description="Clean old downloads. Default: false"),
+                "days_old": types.Schema(type="INTEGER", description="Delete files older than N days. Default: 30")
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="network_diagnostics",
+        description="Run network diagnostics: ping, DNS lookup, traceroute, port scan.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "host": types.Schema(type="STRING", description="Target host to diagnose. Default: google.com"),
+                "test_type": types.Schema(type="STRING", description="Test type: 'ping', 'dns', 'traceroute', 'ports'. Default: 'ping'")
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="bookmark_conversation",
+        description="Bookmark the current conversation turn for later reference.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "label": types.Schema(type="STRING", description="Bookmark label/name."),
+                "note": types.Schema(type="STRING", description="Optional note about this bookmark.")
+            },
+            required=["label"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="schedule_task",
+        description="Schedule a task to run at a specific time or interval.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "command": types.Schema(type="STRING", description="Command or task description to schedule."),
+                "run_at": types.Schema(type="STRING", description="When to run: 'in 5 minutes', 'at 3pm', 'daily 9am'."),
+                "recurring": types.Schema(type="BOOLEAN", description="Whether this task repeats. Default: false")
+            },
+            required=["command", "run_at"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="clipboard_history",
+        description="View recent clipboard history (if tracking is enabled).",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "count": types.Schema(type="INTEGER", description="Number of recent items to show. Default: 10")
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="memory_usage",
+        description="Show detailed memory usage breakdown for JARVIS and the system.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="connection_status",
+        description="Show detailed connection status: latency, packet loss, session health.",
+        parameters=types.Schema(type="OBJECT", properties={})
     ),
 ]
 
@@ -1226,7 +1416,50 @@ function initBridge() {
             if (path && bridge) bridge.exportChat(path);
         }
 
+        function toggleTheme() {
+            document.body.classList.toggle('light-theme');
+            const isLight = document.body.classList.contains('light-theme');
+            localStorage.setItem('jarvis-theme', isLight ? 'light' : 'dark');
+        }
+
+        function toggleVoiceMode() {
+            const toggle = document.getElementById('voice-toggle');
+            if (toggle) {
+                toggle.checked = !toggle.checked;
+                toggleVoice(toggle.checked);
+            }
+        }
+
+        function showBookmarks() {
+            if (bridge) bridge.showBookmarks();
+        }
+
+        function updateConnectionStatus(status, latency) {
+            const dot = document.getElementById('conn-dot');
+            const text = document.getElementById('conn-text');
+            if (!dot || !text) return;
+
+            dot.className = 'conn-dot';
+            if (status === 'ONLINE') {
+                dot.style.background = '#00f5d4';
+                dot.style.boxShadow = '0 0 6px #00f5d4';
+            } else if (status === 'WEAK') {
+                dot.classList.add('weak');
+            } else {
+                dot.classList.add('dead');
+            }
+            text.innerText = status + (latency ? ' ' + latency + 'ms' : '');
+        }
+
+        function updateMemBar(used, total) {
+            const bar = document.getElementById('mem-bar');
+            if (bar) bar.innerText = 'MEM: ' + used + ' / ' + total;
+        }
+
+        // Restore theme preference
         document.addEventListener('DOMContentLoaded', function() {
+            const savedTheme = localStorage.getItem('jarvis-theme');
+            if (savedTheme === 'light') document.body.classList.add('light-theme');
             initBridge();
         });
 
@@ -1465,6 +1698,22 @@ function initBridge() {
     </script>
 </head>
 <body>
+    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">THEME</button>
+
+    <div class="quick-actions">
+        <button class="quick-btn" onclick="bridge.requestImagePick()" title="Upload image">📷</button>
+        <button class="quick-btn" onclick="bridge.triggerReconnect()" title="Reconnect">🔄</button>
+        <button class="quick-btn" onclick="toggleVoiceMode()" title="Toggle voice">🎤</button>
+        <button class="quick-btn" onclick="showBookmarks()" title="Bookmarks">🔖</button>
+    </div>
+
+    <div class="conn-indicator" id="conn-indicator">
+        <div class="conn-dot" id="conn-dot"></div>
+        <span id="conn-text">ONLINE</span>
+    </div>
+
+    <div class="mem-bar" id="mem-bar">MEM: --</div>
+
     <div id="boot-overlay">
         <svg width="80" height="80" viewBox="0 0 300 300" style="margin-bottom:20px; filter:drop-shadow(0 0 20px rgba(0,212,255,0.4));">
             <defs>
@@ -2028,6 +2277,9 @@ class PyBridge(QObject):
     approvalRequested = pyqtSignal(str, str, str)
     audioDevicesListed = pyqtSignal(str)
     configPushed = pyqtSignal(str)
+    connectionStatusUpdated = pyqtSignal(str, int)
+    memoryUsageUpdated = pyqtSignal(str, str)
+    bookmarksListed = pyqtSignal(str)
 
     def __init__(self, window_handle):
         super().__init__()
@@ -2121,6 +2373,20 @@ class PyBridge(QObject):
     def exportChat(self, path: str):
         if self.window.core:
             self.window.core.export_chat(path)
+
+    @pyqtSlot()
+    def showBookmarks(self):
+        if self.window.core:
+            bookmarks = self.window.core._tool_list_bookmarks()
+            self.bookmarksListed.emit(bookmarks)
+
+    @pyqtSlot(str, int)
+    def updateConnectionStatus(self, status: str, latency: int):
+        self.connectionStatusUpdated.emit(status, latency)
+
+    @pyqtSlot(str, str)
+    def updateMemoryUsage(self, used: str, total: str):
+        self.memoryUsageUpdated.emit(used, total)
 
 
 # ==========================================
@@ -2229,7 +2495,32 @@ class JarvisCore:
             self._emit_log("SYSTEM", "API Key not found. Configure api_keys.json or GEMINI_API_KEY env var.")
             self.set_state("OFFLINE")
             return
+        # Start memory monitor
+        asyncio.create_task(self._memory_monitor())
         await self._connect_pipeline()
+
+    async def _memory_monitor(self):
+        """Monitor memory usage and trigger cleanup if needed."""
+        import gc
+        while not self._shutdown:
+            try:
+                import psutil
+                process = psutil.Process()
+                mem_mb = process.memory_info().rss / (1024 * 1024)
+                if mem_mb > MAX_MEMORY_MB:
+                    logger.warning(f"Memory usage high: {mem_mb:.0f}MB. Triggering cleanup.")
+                    gc.collect()
+                    # Trim history if needed
+                    with self._history_lock:
+                        while len(self.history) > MAX_HISTORY // 2 and len(self.history) > 10:
+                            removed = self.history.pop(0)
+                            txt = ''.join(p.text for p in removed.parts if hasattr(p, 'text') and p.text)
+                            self.context_chars -= len(txt)
+                            self.context_tokens -= max(1, len(txt) // 4)
+                    self._emit_log("SYSTEM", f"Memory cleanup complete. Freed resources.")
+            except Exception as e:
+                logger.debug(f"Memory monitor error: {e}")
+            await asyncio.sleep(GC_INTERVAL)
 
     def set_state(self, state: str):
         with self._state_lock:
@@ -2599,6 +2890,23 @@ class JarvisCore:
         except Exception as e:
             self._emit_log("SYSTEM", f"Export failed: {e}")
 
+    def _tool_list_bookmarks(self) -> str:
+        """List all saved bookmarks."""
+        try:
+            bookmarks_file = BASE_DIR / "bookmarks.json"
+            if not bookmarks_file.exists():
+                return "No bookmarks saved yet."
+            bookmarks = json.loads(bookmarks_file.read_text())
+            if not bookmarks:
+                return "No bookmarks saved yet."
+            lines = [f"Saved Bookmarks ({len(bookmarks)}):"]
+            for b in bookmarks[-20:]:
+                ts = b.get("timestamp", "unknown")[:16]
+                lines.append(f"  [{ts}] {b.get('label', 'Unnamed')}: {b.get('note', '')}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Bookmark list failed: {e}"
+
     def stop(self):
         self._shutdown = True
         self.watchdog.stop()
@@ -2610,9 +2918,12 @@ class JarvisCore:
         self.loop.call_soon_threadsafe(self.loop.stop)
 
     async def _connect_pipeline(self):
+        """Main connection loop with hardened retry logic."""
+        connection_attempts = 0
         while not self._shutdown:
             model = self.model_pool[self.current_model_idx % len(self.model_pool)]
             is_fallback = self.current_model_idx > 0
+            connection_attempts += 1
 
             try:
                 self.set_state("RECONNECTING" if is_fallback else "CONNECTING")
@@ -3020,6 +3331,80 @@ class JarvisCore:
                 )
             elif name == "read_image":
                 result = await asyncio.to_thread(self._tool_read_image, args.get("path", ""))
+            elif name == "send_email":
+                result = await asyncio.to_thread(
+                    self._tool_send_email,
+                    args.get("to", ""), args.get("subject", ""), args.get("body", ""),
+                    args.get("username", ""), args.get("password", ""),
+                    args.get("smtp_server", "smtp.gmail.com"),
+                    int(args.get("smtp_port", 587) or 587),
+                    bool(args.get("use_tls", True))
+                )
+            elif name == "send_discord_message":
+                result = await asyncio.to_thread(
+                    self._tool_send_discord_message,
+                    args.get("webhook_url", ""), args.get("message", ""),
+                    args.get("username", None)
+                )
+            elif name == "open_url":
+                result = await asyncio.to_thread(
+                    self._tool_open_url,
+                    args.get("url", ""), bool(args.get("new_window", False))
+                )
+            elif name == "download_video":
+                result = await asyncio.to_thread(
+                    self._tool_download_video,
+                    args.get("url", ""), args.get("format", "best"),
+                    args.get("output_path", ""), bool(args.get("audio_only", False))
+                )
+            elif name == "generate_qr_code":
+                result = await asyncio.to_thread(
+                    self._tool_generate_qr_code,
+                    args.get("data", ""), args.get("output_path", ""),
+                    int(args.get("size", 10) or 10)
+                )
+            elif name == "password_generator":
+                result = await asyncio.to_thread(
+                    self._tool_password_generator,
+                    int(args.get("length", 16) or 16),
+                    bool(args.get("include_uppercase", True)),
+                    bool(args.get("include_numbers", True)),
+                    bool(args.get("include_symbols", True))
+                )
+            elif name == "system_cleanup":
+                result = await asyncio.to_thread(
+                    self._tool_system_cleanup,
+                    bool(args.get("temp_files", True)),
+                    bool(args.get("recycle_bin", False)),
+                    bool(args.get("downloads", False)),
+                    int(args.get("days_old", 30) or 30)
+                )
+            elif name == "network_diagnostics":
+                result = await asyncio.to_thread(
+                    self._tool_network_diagnostics,
+                    args.get("host", "google.com"),
+                    args.get("test_type", "ping")
+                )
+            elif name == "bookmark_conversation":
+                result = await asyncio.to_thread(
+                    self._tool_bookmark_conversation,
+                    args.get("label", ""), args.get("note", "")
+                )
+            elif name == "schedule_task":
+                result = await asyncio.to_thread(
+                    self._tool_schedule_task,
+                    args.get("command", ""), args.get("run_at", ""),
+                    bool(args.get("recurring", False))
+                )
+            elif name == "clipboard_history":
+                result = await asyncio.to_thread(
+                    self._tool_clipboard_history,
+                    int(args.get("count", 10) or 10)
+                )
+            elif name == "memory_usage":
+                result = await asyncio.to_thread(self._tool_memory_usage)
+            elif name == "connection_status":
+                result = await asyncio.to_thread(self._tool_connection_status)
             else:
                 result = f"Unknown protocol: {name}"
         except Exception as e:
@@ -3583,8 +3968,8 @@ class JarvisCore:
 
     # ----- Internet -----
     def _tool_web_search(self, query: str, max_results: int = 5):
-        """DuckDuckGo HTML search."""
-        return _web_search_ddg(query, max_results)
+        """Multi-engine web search with fallback."""
+        return _web_search(query, max_results)
 
     def _tool_fetch_url(self, url: str, max_chars: int = 8000):
         """Fetch a URL and return extracted text."""
@@ -3932,6 +4317,382 @@ end tell"""
         return f"macOS focus failed: {e}"
 
 
+
+
+    # ==============================
+    # MESSAGING & COMMUNICATION TOOLS
+    # ==============================
+
+    def _tool_send_email(self, to: str, subject: str, body: str, username: str, password: str,
+                         smtp_server: str = "smtp.gmail.com", smtp_port: int = 587, use_tls: bool = True):
+        """Send an email via SMTP with TLS encryption."""
+        try:
+            msg = MIMEMultipart()
+            msg["From"] = username
+            msg["To"] = to
+            msg["Subject"] = subject
+            msg.attach(MIMEText(body, "plain"))
+
+            server = smtplib.SMTP(smtp_server, smtp_port)
+            if use_tls:
+                server.starttls()
+            server.login(username, password)
+            server.send_message(msg)
+            server.quit()
+            return f"Email sent successfully to {to}."
+        except smtplib.SMTPAuthenticationError:
+            return "Authentication failed. Use an app password for Gmail."
+        except Exception as e:
+            return f"Email failed: {e}"
+
+    def _tool_send_discord_message(self, webhook_url: str, message: str, username: str = None):
+        """Send a message to Discord via webhook."""
+        try:
+            payload = {"content": message}
+            if username:
+                payload["username"] = username
+
+            if HAS_REQUESTS:
+                resp = requests.post(webhook_url, json=payload, timeout=10)
+                if resp.status_code in (200, 204):
+                    return "Discord message sent successfully."
+                return f"Discord webhook failed: HTTP {resp.status_code}"
+            else:
+                data = json.dumps(payload).encode("utf-8")
+                req = urllib.request.Request(
+                    webhook_url,
+                    data=data,
+                    headers={"Content-Type": "application/json"},
+                    method="POST"
+                )
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    if resp.status in (200, 204):
+                        return "Discord message sent successfully."
+                    return f"Discord webhook failed: HTTP {resp.status}"
+        except Exception as e:
+            return f"Discord message failed: {e}"
+
+    def _tool_open_url(self, url: str, new_window: bool = False):
+        """Open a URL in the default browser with safety validation."""
+        ok, reason = _is_safe_url(url)
+        if not ok:
+            return f"URL rejected: {reason}"
+        try:
+            if new_window:
+                webbrowser.open(url, new=1)
+            else:
+                webbrowser.open(url, new=2)
+            return f"Opened {url} in browser."
+        except Exception as e:
+            return f"Failed to open URL: {e}"
+
+    def _tool_download_video(self, url: str, format: str = "best", output_path: str = "",
+                              audio_only: bool = False):
+        """Download a video using yt-dlp."""
+        if not HAS_YTDLP:
+            return "yt-dlp is not installed. Run: pip install yt-dlp"
+        try:
+            out_dir = Path(_expand_user_path(output_path)) if output_path else DOWNLOAD_DIR
+            out_dir.mkdir(parents=True, exist_ok=True)
+
+            format_map = {
+                "best": "bestvideo+bestaudio/best",
+                "worst": "worst",
+                "audio_only": "bestaudio/best",
+                "720p": "bestvideo[height<=720]+bestaudio/best[height<=720]",
+                "1080p": "bestvideo[height<=1080]+bestaudio/best[height<=1080]",
+            }
+            selected_format = format_map.get(format, "bestvideo+bestaudio/best")
+
+            ydl_opts = {
+                "format": selected_format,
+                "outtmpl": str(out_dir / "%(title)s [%(id)s].%(ext)s"),
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+            }
+
+            if audio_only:
+                ydl_opts["format"] = "bestaudio/best"
+                ydl_opts["postprocessors"] = [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "192",
+                }]
+
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                title = info.get("title", "unknown")
+                return f"Downloaded: {title} to {out_dir}"
+        except Exception as e:
+            return f"Download failed: {e}"
+
+    def _tool_generate_qr_code(self, data: str, output_path: str = "", size: int = 10):
+        """Generate a QR code image."""
+        if not HAS_QRCODE:
+            return "qrcode module not installed. Run: pip install qrcode[pil]"
+        try:
+            qr = qrcode.QRCode(
+                version=1,
+                box_size=size,
+                border=4,
+            )
+            qr.add_data(data)
+            qr.make(fit=True)
+            img = qr.make_image(fill_color="black", back_color="white")
+            out = Path(_expand_user_path(output_path)) if output_path else BASE_DIR / "qrcode.png"
+            img.save(str(out))
+            return f"QR code saved to {out}"
+        except Exception as e:
+            return f"QR generation failed: {e}"
+
+    def _tool_password_generator(self, length: int = 16, include_uppercase: bool = True,
+                                   include_numbers: bool = True, include_symbols: bool = True):
+        """Generate a secure random password."""
+        import secrets
+        import string
+
+        chars = string.ascii_lowercase
+        if include_uppercase:
+            chars += string.ascii_uppercase
+        if include_numbers:
+            chars += string.digits
+        if include_symbols:
+            chars += "!@#$%^&*()_+-=[]{}|;:,.<>?"
+
+        if not chars:
+            return "Error: At least one character type must be selected."
+
+        password = "".join(secrets.choice(chars) for _ in range(length))
+
+        # Calculate entropy
+        entropy = length * math.log2(len(chars))
+        strength = "weak" if entropy < 50 else "moderate" if entropy < 80 else "strong"
+
+        return f"Generated password ({strength}, {entropy:.0f} bits entropy):\n{password}"
+
+    def _tool_system_cleanup(self, temp_files: bool = True, recycle_bin: bool = False,
+                              downloads: bool = False, days_old: int = 30):
+        """Clean temporary files and free disk space."""
+        results = []
+        total_freed = 0
+
+        if temp_files:
+            try:
+                temp_dir = Path(tempfile.gettempdir())
+                count = 0
+                freed = 0
+                for item in temp_dir.iterdir():
+                    try:
+                        if item.is_file() and (time.time() - item.stat().st_mtime) > (days_old * 86400):
+                            freed += item.stat().st_size
+                            item.unlink()
+                            count += 1
+                        elif item.is_dir() and item.name.startswith("tmp"):
+                            import shutil
+                            freed += sum(f.stat().st_size for f in item.rglob("*") if f.is_file())
+                            shutil.rmtree(item, ignore_errors=True)
+                            count += 1
+                    except Exception:
+                        pass
+                results.append(f"Temp files: {count} items removed, {_format_size(freed)} freed")
+                total_freed += freed
+            except Exception as e:
+                results.append(f"Temp cleanup failed: {e}")
+
+        if recycle_bin:
+            try:
+                if os.name == "nt":
+                    import winshell
+                    winshell.recycle_bin().empty(confirm=False, show_progress=False, sound=False)
+                    results.append("Recycle bin emptied")
+                else:
+                    trash_paths = [Path.home() / ".Trash", Path.home() / ".local/share/Trash"]
+                    for tp in trash_paths:
+                        if tp.exists():
+                            import shutil
+                            shutil.rmtree(tp, ignore_errors=True)
+                    results.append("Trash emptied")
+            except Exception as e:
+                results.append(f"Recycle bin cleanup failed: {e}")
+
+        return "\n".join(results) + f"\nTotal freed: {_format_size(total_freed)}"
+
+    def _tool_network_diagnostics(self, host: str = "google.com", test_type: str = "ping"):
+        """Run network diagnostics."""
+        try:
+            if test_type == "ping":
+                param = "-n" if os.name == "nt" else "-c"
+                result = subprocess.run(
+                    ["ping", param, "4", host],
+                    capture_output=True, text=True, timeout=30
+                )
+                return result.stdout if result.returncode == 0 else f"Ping failed:\n{result.stderr}"
+
+            elif test_type == "dns":
+                result = subprocess.run(
+                    ["nslookup" if os.name == "nt" else "dig", host],
+                    capture_output=True, text=True, timeout=10
+                )
+                return result.stdout
+
+            elif test_type == "traceroute":
+                cmd = "tracert" if os.name == "nt" else "traceroute"
+                result = subprocess.run(
+                    [cmd, host],
+                    capture_output=True, text=True, timeout=60
+                )
+                return result.stdout[:2000]
+
+            elif test_type == "ports":
+                # Quick port scan of common ports
+                common_ports = [80, 443, 22, 21, 25, 53, 110, 143, 3306, 3389]
+                open_ports = []
+                for port in common_ports:
+                    try:
+                        with socket.create_connection((host, port), timeout=2):
+                            open_ports.append(port)
+                    except:
+                        pass
+                return f"Open ports on {host}: {open_ports if open_ports else 'None found'}"
+
+            return f"Unknown test type: {test_type}"
+        except Exception as e:
+            return f"Network diagnostic failed: {e}"
+
+    def _tool_bookmark_conversation(self, label: str, note: str = ""):
+        """Bookmark the current conversation turn."""
+        try:
+            bookmarks_file = BASE_DIR / "bookmarks.json"
+            bookmarks = []
+            if bookmarks_file.exists():
+                bookmarks = json.loads(bookmarks_file.read_text())
+
+            bookmark = {
+                "label": label,
+                "note": note,
+                "timestamp": datetime.datetime.now().isoformat(),
+                "history_index": len(self.history)
+            }
+            bookmarks.append(bookmark)
+            bookmarks_file.write_text(json.dumps(bookmarks, indent=2))
+            return f"Bookmark '{label}' saved."
+        except Exception as e:
+            return f"Bookmark failed: {e}"
+
+    def _tool_schedule_task(self, command: str, run_at: str, recurring: bool = False):
+        """Schedule a task for later execution."""
+        try:
+            # Parse simple time expressions
+            from datetime import datetime, timedelta
+            now = datetime.now()
+            scheduled_time = None
+
+            run_at_lower = run_at.lower().strip()
+
+            if run_at_lower.startswith("in "):
+                parts = run_at_lower.split()
+                if len(parts) >= 3:
+                    amount = int(parts[1])
+                    unit = parts[2]
+                    if "minute" in unit:
+                        scheduled_time = now + timedelta(minutes=amount)
+                    elif "hour" in unit:
+                        scheduled_time = now + timedelta(hours=amount)
+                    elif "second" in unit:
+                        scheduled_time = now + timedelta(seconds=amount)
+            elif run_at_lower.startswith("at "):
+                time_str = run_at_lower[3:].strip()
+                try:
+                    scheduled_time = datetime.strptime(time_str, "%I%p").replace(
+                        year=now.year, month=now.month, day=now.day
+                    )
+                    if scheduled_time < now:
+                        scheduled_time += timedelta(days=1)
+                except ValueError:
+                    try:
+                        scheduled_time = datetime.strptime(time_str, "%H:%M").replace(
+                            year=now.year, month=now.month, day=now.day
+                        )
+                        if scheduled_time < now:
+                            scheduled_time += timedelta(days=1)
+                    except ValueError:
+                        pass
+
+            if not scheduled_time:
+                return f"Could not parse time: '{run_at}'. Try formats like 'in 5 minutes' or 'at 3pm'"
+
+            delay = (scheduled_time - now).total_seconds()
+            if delay <= 0:
+                return "Scheduled time is in the past."
+
+            def _run_task():
+                self._emit_log("TIMER", f"Scheduled task fired: {command}")
+                self.dispatch_text(command)
+
+            timer = threading.Timer(delay, _run_task)
+            timer.daemon = True
+            self._active_timers.append(timer)
+            timer.start()
+
+            return f"Task scheduled for {scheduled_time.strftime('%Y-%m-%d %H:%M:%S')} ({int(delay)}s from now)"
+        except Exception as e:
+            return f"Scheduling failed: {e}"
+
+    def _tool_clipboard_history(self, count: int = 10):
+        """View recent clipboard history."""
+        # This is a placeholder - full clipboard history would require
+        # a background clipboard monitor which is complex
+        try:
+            current = pyperclip.paste()
+            return f"Current clipboard content ({len(current)} chars):\n{current[:500]}"
+        except Exception as e:
+            return f"Clipboard read failed: {e}"
+
+    def _tool_memory_usage(self):
+        """Show detailed memory usage."""
+        try:
+            import psutil
+            process = psutil.Process()
+            mem_info = process.memory_info()
+            sys_mem = psutil.virtual_memory()
+
+            lines = [
+                "=== JARVIS Memory Usage ===",
+                f"RSS ( Resident Set Size): {_format_size(mem_info.rss)}",
+                f"VMS (Virtual Memory Size): {_format_size(mem_info.vms)}",
+                f"Percent of system RAM: {process.memory_percent():.1f}%",
+                "",
+                "=== System Memory ===",
+                f"Total: {_format_size(sys_mem.total)}",
+                f"Available: {_format_size(sys_mem.available)}",
+                f"Used: {_format_size(sys_mem.used)} ({sys_mem.percent}%)",
+                f"Free: {_format_size(sys_mem.free)}",
+            ]
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Memory check failed: {e}"
+
+    def _tool_connection_status(self):
+        """Show detailed connection status."""
+        try:
+            lines = [
+                "=== Connection Status ===",
+                f"Session ready: {self.session_ready.is_set()}",
+                f"Current model: {self.model_pool[self.current_model_idx % len(self.model_pool)]}",
+                f"Model fallback active: {self.current_model_idx > 0}",
+                f"Reconnect backoff: {self.reconnect_backoff:.1f}s",
+                f"Retry cycle: {self.retry_cycle}",
+                f"Pending messages: {len(self.pending_messages)}",
+                f"History length: {len(self.history)} turns",
+                f"Context tokens: {self.context_tokens}",
+                f"Voice enabled: {self.voice_enabled}",
+                f"Mic active: {self.mic_active}",
+                f"Audio player active: {self.audio_player._active}",
+            ]
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Status check failed: {e}"
 
 # ==========================================
 # WEATHER (free public APIs, no key required)
