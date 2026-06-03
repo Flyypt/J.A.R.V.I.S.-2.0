@@ -133,7 +133,7 @@ python jarvis.py
 
 ### 5. First-Time Setup
 
-On first launch, `jarvis_config.json` is auto-created with sensible defaults. The approval system is **enabled by default** — dangerous tools will prompt you before executing.
+On first launch, `jarvis_config.json` is auto-created with sensible defaults. The approval system is **enabled by default** dangerous tools will prompt you before executing.
 
 ---
 
