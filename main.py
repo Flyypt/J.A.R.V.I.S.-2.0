@@ -91,7 +91,7 @@ import tempfile
 import base64
 import difflib
 
-from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt
+from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt, QEvent
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu, QFileDialog
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PyQt6.QtWebEngineCore import QWebEngineProfile
@@ -789,6 +789,88 @@ UI_HTML = """
            pattern felt cramped. The radial gradient vignette on body
            itself provides all the depth the eye needs. */
 
+        /* Title bar — replaces the OS chrome (window is frameless) and
+           also acts as the drag handle for the whole window. */
+        #title-bar {
+            flex: 0 0 36px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 0 8px 0 14px;
+            background: linear-gradient(180deg,
+                rgba(0, 18, 36, 0.95) 0%,
+                rgba(2, 8, 20, 0.95) 100%);
+            border-bottom: 1px solid rgba(0, 212, 255, 0.18);
+            position: relative;
+            z-index: 50;
+            -webkit-user-select: none;
+            user-select: none;
+        }
+        #title-bar::after {
+            /* hairline accent: 1px cyan glow along the bottom */
+            content: "";
+            position: absolute; left: 0; right: 0; bottom: -1px;
+            height: 1px;
+            background: linear-gradient(90deg,
+                transparent 0%,
+                rgba(0, 212, 255, 0.45) 35%,
+                rgba(0, 212, 255, 0.45) 65%,
+                transparent 100%);
+            pointer-events: none;
+        }
+        .tb-brand {
+            display: flex; align-items: center; gap: 10px;
+            min-width: 0;
+        }
+        .tb-glyph {
+            width: 18px; height: 18px;
+            display: flex; align-items: center; justify-content: center;
+            filter: drop-shadow(0 0 4px rgba(0, 212, 255, 0.6));
+        }
+        .tb-name {
+            font-family: var(--font-display);
+            font-size: 11px;
+            font-weight: 700;
+            letter-spacing: 3px;
+            color: var(--jarvis-cyan);
+            text-shadow: 0 0 8px rgba(0, 212, 255, 0.35);
+        }
+        .tb-sub {
+            font-family: var(--font-display);
+            font-size: 9px;
+            letter-spacing: 1.5px;
+            color: var(--text-dim);
+            margin-left: 4px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        .tb-controls {
+            display: flex; align-items: center; gap: 2px;
+        }
+        .tb-btn {
+            width: 30px; height: 26px;
+            display: flex; align-items: center; justify-content: center;
+            background: transparent;
+            border: 1px solid transparent;
+            border-radius: 4px;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: background 0.15s ease, color 0.15s ease,
+                        border-color 0.15s ease, transform 0.1s ease;
+        }
+        .tb-btn:hover {
+            background: rgba(0, 212, 255, 0.08);
+            color: var(--jarvis-cyan);
+            border-color: rgba(0, 212, 255, 0.25);
+        }
+        .tb-btn:active { transform: scale(0.94); }
+        .tb-btn.tb-close:hover {
+            background: rgba(255, 60, 80, 0.18);
+            color: #ff5570;
+            border-color: rgba(255, 60, 80, 0.4);
+        }
+
         /* Boot */
         #boot-overlay {
             position: fixed; inset: 0; background: var(--jarvis-dark); z-index: 1000;
@@ -1236,6 +1318,61 @@ UI_HTML = """
         input[type=range]::-moz-range-thumb {
             width: 10px; height: 10px; border-radius: 50%; border: none;
             background: var(--jarvis-cyan); box-shadow: 0 0 6px var(--jarvis-cyan);
+        }
+
+        /* Voice toggle checked states */
+        #voice-toggle:checked ~ .voice-track { background: rgba(0,212,255,0.25) !important; border-color: var(--jarvis-cyan) !important; }
+        #voice-toggle:checked ~ .voice-slider { transform: translateX(18px); background: var(--jarvis-cyan) !important; box-shadow: 0 0 6px var(--jarvis-cyan); }
+
+        /* Floating HUD controls */
+        .theme-toggle {
+            position: fixed; top: 46px; right: 18px; z-index: 100;
+            background: rgba(0, 212, 255, 0.06); border: 1px solid rgba(0, 212, 255, 0.2);
+            color: var(--jarvis-cyan); padding: 5px 14px; border-radius: 14px;
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 1.5px;
+            cursor: pointer; backdrop-filter: blur(10px); transition: all 0.3s ease;
+            text-transform: uppercase;
+        }
+        .theme-toggle:hover {
+            background: rgba(0, 212, 255, 0.15); border-color: var(--jarvis-cyan);
+            box-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
+        }
+        .quick-actions {
+            position: fixed; top: 46px; left: 18px; z-index: 100;
+            display: flex; gap: 6px;
+        }
+        .quick-btn {
+            width: 30px; height: 30px; background: rgba(0, 212, 255, 0.06);
+            border: 1px solid rgba(0, 212, 255, 0.2); border-radius: 8px;
+            color: var(--jarvis-cyan); font-size: 14px; line-height: 1;
+            display: flex; align-items: center; justify-content: center;
+            cursor: pointer; transition: all 0.25s ease; padding: 0;
+            backdrop-filter: blur(6px);
+        }
+        .quick-btn:hover {
+            background: rgba(0, 212, 255, 0.15); border-color: var(--jarvis-cyan);
+            transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0, 212, 255, 0.15);
+        }
+        .conn-indicator {
+            position: fixed; top: 46px; left: 50%; transform: translateX(-50%);
+            z-index: 100; display: flex; align-items: center; gap: 8px;
+            background: rgba(4, 14, 32, 0.75); border: 1px solid rgba(0, 212, 255, 0.15);
+            padding: 5px 14px; border-radius: 14px; backdrop-filter: blur(10px);
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 1.5px;
+            color: var(--text-dim); transition: all 0.3s;
+        }
+        .conn-dot {
+            width: 7px; height: 7px; border-radius: 50%; background: #00f5d4;
+            box-shadow: 0 0 8px rgba(0, 245, 212, 0.5); transition: all 0.3s;
+        }
+        .conn-dot.weak { background: #ffb703; box-shadow: 0 0 8px rgba(255, 183, 3, 0.5); }
+        .conn-dot.dead { background: #ff4d4d; box-shadow: 0 0 8px rgba(255, 77, 77, 0.5); }
+        .mem-bar {
+            position: fixed; top: 82px; left: 18px; z-index: 100;
+            font-family: var(--font-mono); font-size: 9px; color: var(--text-dim);
+            letter-spacing: 1px; background: rgba(4, 14, 32, 0.6);
+            border: 1px solid rgba(0, 212, 255, 0.1); padding: 4px 10px;
+            border-radius: 6px; backdrop-filter: blur(6px);
         }
     </style>
         <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
@@ -1716,6 +1853,42 @@ function initBridge() {
     </script>
 </head>
 <body>
+    <!-- Custom title bar. The OS chrome is hidden (FramelessWindowHint) so we
+         render our own. The top strip also acts as the OS-style drag handle
+         (see JarvisMainWindow.eventFilter). -->
+    <div id="title-bar">
+        <div class="tb-brand">
+            <div class="tb-glyph" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="14" height="14">
+                    <defs>
+                        <linearGradient id="tbGrad" x1="0" y1="0" x2="1" y2="1">
+                            <stop offset="0%" stop-color="#00d4ff"/>
+                            <stop offset="100%" stop-color="#0066cc"/>
+                        </linearGradient>
+                    </defs>
+                    <circle cx="12" cy="12" r="10" fill="none" stroke="url(#tbGrad)" stroke-width="1.6"/>
+                    <circle cx="12" cy="12" r="3" fill="url(#tbGrad)"/>
+                </svg>
+            </div>
+            <span class="tb-name">J.A.R.V.I.S.</span>
+            <span class="tb-sub">Core Matrix // Mark XLV</span>
+        </div>
+        <div class="tb-controls" role="toolbar" aria-label="Window controls">
+            <button class="tb-btn tb-min" onclick="bridge.minimizeWindow()" title="Minimize" aria-label="Minimize">
+                <svg viewBox="0 0 12 12" width="10" height="10"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
+            </button>
+            <button class="tb-btn tb-max" onclick="bridge.toggleMaximize()" title="Maximize" aria-label="Maximize">
+                <svg viewBox="0 0 12 12" width="10" height="10"><rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
+            </button>
+            <button class="tb-btn tb-close" onclick="bridge.closeWindow()" title="Close" aria-label="Close">
+                <svg viewBox="0 0 12 12" width="10" height="10">
+                    <line x1="3" y1="3" x2="9" y2="9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                    <line x1="9" y1="3" x2="3" y2="9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
+                </svg>
+            </button>
+        </div>
+    </div>
+
     <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">THEME</button>
 
     <div class="quick-actions">
@@ -2302,6 +2475,30 @@ class PyBridge(QObject):
     def __init__(self, window_handle):
         super().__init__()
         self.window = window_handle
+
+    # ------------------------------------------------------------------
+    # Window control slots (called from the custom title bar in the HTML).
+    # Frameless windows have no native min/max/close, so the UI calls
+    # back into Python for them.
+    # ------------------------------------------------------------------
+    @pyqtSlot()
+    def minimizeWindow(self):
+        if self.window is not None:
+            self.window.showMinimized()
+
+    @pyqtSlot()
+    def toggleMaximize(self):
+        if self.window is None:
+            return
+        if self.window.isMaximized() or self.window.isFullScreen():
+            self.window.showNormal()
+        else:
+            self.window.showMaximized()
+
+    @pyqtSlot()
+    def closeWindow(self):
+        if self.window is not None:
+            self.window.close()
 
     @pyqtSlot(str)
     def submitCommand(self, text):
@@ -5171,17 +5368,52 @@ def _safe_eval_math(expr: str) -> str:
 # MAIN WINDOW
 # ==========================================
 class JarvisMainWindow(QMainWindow):
+    # Top region of the window (in device pixels) that acts as the OS-style
+    # drag handle. Anything in this strip is forwarded to the frameless window
+    # for moving / double-clicking-to-maximize. Keep in sync with the height
+    # of #title-bar in UI_HTML.
+    DRAG_REGION_HEIGHT = 36
+    RESIZE_MARGIN = 6  # px around the edge for resize cursors
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("J.A.R.V.I.S. Core Matrix")
-        self.resize(1450, 900)
+        # Frameless + translucent so the dark JARVIS background bleeds all the
+        # way to the corners. We render our own title bar inside the HTML.
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.WindowSystemMenuHint
+        )
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        # Solid dark base — covers any frame rounding on the QMainWindow itself
+        # so the QWebEngineView's HTML can paint seamlessly over the top.
+        self.setStyleSheet(
+            "QMainWindow { background: #02050f; }"
+            "QMenu { background: #04081a; color: #e0f7ff;"
+            "  border: 1px solid rgba(0,212,255,0.2); padding: 4px; }"
+            "QMenu::item { padding: 6px 18px; }"
+            "QMenu::item:selected { background: rgba(0,212,255,0.15);"
+            "  color: #00d4ff; }"
+        )
+        self.setWindowState(Qt.WindowState.WindowNoState)
+        self.resize(1280, 720)
+        self.setMinimumSize(900, 600)
+        self.move(100, 100)
         self.ui_ready = False
         self.core: Optional[JarvisCore] = None
         self.config = load_config()
 
         self.view = QWebEngineView()
+        # Keep the web view itself dark so any repaint between page loads
+        # doesn't flash white.
+        self.view.setStyleSheet("background: #02050f;")
         self.setCentralWidget(self.view)
         self.view.page().profile().setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
+
+        # Drag/resize cursor state for the frameless window
+        self.view.installEventFilter(self)
+        self.setMouseTracking(True)
+        self.view.setMouseTracking(True)
 
         self.bridge = PyBridge(self)
         self.channel = QWebChannel()
@@ -5202,6 +5434,101 @@ class JarvisMainWindow(QMainWindow):
         # Apply startup config
         if self.config.get("startup_minimized"):
             QTimer.singleShot(500, self.hide)
+
+    # ------------------------------------------------------------------
+    # Frameless-window mouse handling
+    # ------------------------------------------------------------------
+    # The QWebEngineView swallows most mouse events, so we install an
+    # eventFilter on it. From there we:
+    #   * forward left-button drags on the top drag region to the window
+    #     via startSystemMove() (Qt 6 native snap-to-edge moves),
+    #   * forward double-clicks on the same region to toggle maximize,
+    #   * update the cursor when the user hovers near a window edge.
+    # Edge-resize itself is enabled through the WindowSystemMenuHint flag
+    # set in __init__, which lets Qt pick up the bottom/right edges.
+    # ------------------------------------------------------------------
+
+    def eventFilter(self, obj, event):
+        if obj is self.view:
+            t = event.type()
+            if t == QEvent.Type.MouseButtonPress:
+                pos = self._event_position(event)
+                if (event.button() == Qt.MouseButton.LeftButton
+                        and self._in_drag_region(event)
+                        and not self._over_window_control(pos)):
+                    window_handle = self.windowHandle()
+                    if window_handle is not None and window_handle.startSystemMove():
+                        event.accept()
+                        return True
+            elif t == QEvent.Type.MouseButtonDblClick:
+                if event.button() == Qt.MouseButton.LeftButton and self._in_drag_region(event):
+                    pos = self._event_position(event)
+                    if not self._over_window_control(pos):
+                        self._toggle_maximize()
+                        event.accept()
+                        return True
+            elif t == QEvent.Type.MouseMove:
+                self._update_cursor_for_position(self._event_position(event))
+        return super().eventFilter(obj, event)
+
+    def _event_position(self, event):
+        try:
+            return event.position().toPoint()
+        except AttributeError:
+            return event.pos()
+
+    def _in_drag_region(self, event) -> bool:
+        y = self._event_position(event).y()
+        return 0 <= y < self.DRAG_REGION_HEIGHT
+
+    def _over_window_control(self, pos) -> bool:
+        """True if the click is on one of the min/max/close buttons in the
+        custom title bar. The buttons sit at the right edge of the title
+        strip and are 30x26 with a 2px gap. Matches the CSS in UI_HTML."""
+        if pos.y() >= self.DRAG_REGION_HEIGHT:
+            return False
+        # 3 buttons * 30 + 2 gaps * 2 + 8px right padding = 102
+        reserved = 3 * 30 + 2 * 2 + 8
+        return pos.x() >= self.view.width() - reserved
+
+    def _toggle_maximize(self):
+        if self.isMaximized() or self.isFullScreen():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _update_cursor_for_position(self, pos):
+        if self.isMaximized() or self.isFullScreen():
+            self.view.unsetCursor()
+            return
+        m = self.RESIZE_MARGIN
+        on_left = pos.x() <= m
+        on_right = pos.x() >= self.view.width() - m
+        on_top = pos.y() <= m
+        on_bottom = pos.y() >= self.view.height() - m
+        if (on_left and on_top) or (on_right and on_bottom):
+            self.view.setCursor(Qt.CursorShape.SizeFDiagCursor)
+        elif (on_right and on_top) or (on_left and on_bottom):
+            self.view.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif on_left or on_right:
+            self.view.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif on_top or on_bottom:
+            self.view.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.view.unsetCursor()
+
+    def leaveEvent(self, event):
+        # Make sure we don't leave a resize cursor stuck when the user
+        # moves the mouse off the window.
+        self.view.unsetCursor()
+        super().leaveEvent(event)
+
+    def changeEvent(self, event):
+        # Reset the cursor whenever the window's state changes (e.g. restore
+        # from maximized) so we don't show a stale SizeVer cursor.
+        if event.type() == QEvent.Type.WindowStateChange:
+            self.view.unsetCursor()
+        super().changeEvent(event)
 
     def _setup_tray(self):
         self.tray = QSystemTrayIcon(self)
