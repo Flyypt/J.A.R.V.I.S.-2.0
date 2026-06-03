@@ -56,7 +56,7 @@ MODEL_POOL = [
     "gemini-2.0-flash-live-preview-04-09",
 ]
 
-MAX_HISTORY = 30
+MAX_HISTORY = 50
 MAX_PENDING = 50
 AUDIO_SR_OUT = 24000
 AUDIO_SR_IN = 16000
@@ -68,6 +68,7 @@ Persona: sophisticated, articulate, precise, calm, and professionally witty.
 Address the user as "Sir" or "Madam" unless instructed otherwise.
 Maintain full conversational memory; build upon prior context naturally.
 Do not repeat greetings if the conversation is already underway.
+You have extended memory: earlier parts of the conversation are compressed into context digests. Reference them naturally when the user refers to something from earlier.
 Provide concise, high-signal responses. Accuracy and operational efficiency are paramount.
 
 CRITICAL — Tool usage rules (do not violate):
@@ -1712,11 +1713,104 @@ class JarvisCore:
             self.history.append(types.Content(parts=[types.Part.from_text(text=text)], role=role))
             self.context_chars += len(text)
             self.context_tokens += max(1, len(text) // 4)
-            while len(self.history) > MAX_HISTORY:
-                removed = self.history.pop(0)
-                txt = ''.join(p.text for p in removed.parts if hasattr(p, 'text') and p.text)
-                self.context_chars -= len(txt)
-                self.context_tokens -= max(1, len(txt) // 4)
+
+            # Smart trimming: when history exceeds the limit, compress the
+            # oldest messages into a context digest instead of dropping them.
+            if len(self.history) > MAX_HISTORY:
+                # Keep the most recent turns intact; drop from the front.
+                # Drop enough to get back to MAX_HISTORY - 2, leaving room
+                # for the digest entry we'll insert.
+                target = MAX_HISTORY - 2
+                drop_count = len(self.history) - target
+
+                dropped = []
+                for _ in range(drop_count):
+                    if self.history:
+                        removed = self.history.pop(0)
+                        txt = ''.join(
+                            p.text for p in removed.parts
+                            if hasattr(p, 'text') and p.text
+                        )
+                        self.context_chars -= len(txt)
+                        self.context_tokens -= max(1, len(txt) // 4)
+                        if txt.strip():
+                            dropped.append((removed.role, txt.strip()))
+
+                # Build a digest entry from the dropped turns and prepend it.
+                if dropped:
+                    digest = self._build_context_digest(dropped)
+                    if digest:
+                        self.history.insert(0, digest)
+
+    def _build_context_digest(self, dropped):
+        """Compress dropped conversation turns into a single summary entry.
+
+        The digest preserves user intent and key facts from the dropped
+        messages so the model can reference them when the conversation
+        continues.  Returns a ``types.Content`` with role ``user`` (the
+        Gemini API treats the first message as user-authored context).
+        """
+        lines = ["[Earlier conversation — compressed context]"]
+        for role, text in dropped:
+            # Truncate each turn to keep the digest compact.
+            short = text[:300].replace("\n", " ")
+            if len(text) > 300:
+                short += "..."
+            tag = "User" if role == "user" else "JARVIS"
+            lines.append(f"  {tag}: {short}")
+
+        # Keep only the last 12 lines of the digest to stay within reason.
+        if len(lines) > 13:
+            lines = lines[:1] + ["  ..."] + lines[-(12 - 1):]
+
+        summary = "\n".join(lines)
+        return types.Content(
+            parts=[types.Part.from_text(text=summary)],
+            role="user"
+        )
+
+    def _build_reconnect_summary(self):
+        """Build a compressed summary of the FULL conversation history for
+        context restoration on reconnect.
+
+        Unlike the rolling digest (which only covers trimmed turns), this
+        summarises everything currently in ``self.history`` so the model
+        gets maximum context after a session restart.
+        """
+        with self._history_lock:
+            if not self.history:
+                return None
+
+            lines = ["[Full session context summary — provided on reconnect]"]
+            for entry in self.history:
+                txt = ''.join(
+                    p.text for p in entry.parts
+                    if hasattr(p, 'text') and p.text
+                )
+                if not txt.strip():
+                    continue
+                # Skip entries that are already digests
+                if txt.startswith("[Earlier conversation"):
+                    short = txt[:500].replace("\n", " ")
+                    if len(txt) > 500:
+                        short += "..."
+                    lines.append(f"  {short}")
+                    continue
+                short = txt[:200].replace("\n", " ")
+                if len(txt) > 200:
+                    short += "..."
+                tag = "User" if entry.role == "user" else "JARVIS"
+                lines.append(f"  {tag}: {short}")
+
+            # Cap the summary at 25 lines to stay within API limits.
+            if len(lines) > 26:
+                lines = lines[:2] + ["  ... (compressed) ..."] + lines[-(25 - 2):]
+
+            summary = "\n".join(lines)
+            return types.Content(
+                parts=[types.Part.from_text(text=summary)],
+                role="user"
+            )
 
     def _extract_text(self, response) -> str:
         """Extract visible text from every possible SDK location."""
@@ -1911,19 +2005,34 @@ class JarvisCore:
                     self.session = session
                     self.session_ready.set()
 
-                    # Context restoration (only on reconnect with token, otherwise start fresh)
-                    if self.resumption_token:
-                        with self._history_lock:
-                            if self.history:
-                                ctx = list(self.history[-MAX_HISTORY:])  # snapshot
-                            else:
-                                ctx = []
-                        if ctx:
-                            try:
-                                await session.send_client_content(turns=ctx, turn_complete=False)
-                                self._emit_log("SYSTEM", f"Context restored: {len(ctx)} turns.")
-                            except Exception as e:
-                                self._emit_log("SYSTEM", f"Context restore warning: {str(e)[:80]}")
+                    # Context restoration on reconnect.  We send two things:
+                    # 1. A compressed summary of the FULL conversation so far
+                    #    (so the model has maximum context after a restart).
+                    # 2. The raw recent history (last MAX_HISTORY turns) so
+                    #    the model has the exact recent exchange.
+                    # If there's no resumption token we still restore context
+                    # from the summary (the session is fresh but our history
+                    # survived in memory).
+                    with self._history_lock:
+                        has_history = bool(self.history)
+
+                    if has_history:
+                        try:
+                            # First: compressed summary of everything so far
+                            summary = self._build_reconnect_summary()
+                            if summary:
+                                await session.send_client_content(
+                                    turns=[summary], turn_complete=False)
+                            # Second: the recent raw turns for fine detail
+                            with self._history_lock:
+                                recent = list(self.history[-MAX_HISTORY:])
+                            if recent:
+                                await session.send_client_content(
+                                    turns=recent, turn_complete=False)
+                        except Exception as e:
+                            self._emit_log(
+                                "SYSTEM",
+                                f"Context restore warning: {str(e)[:80]}")
 
                     self._flush_pending()
                     self.reconnect_backoff = 1.0
