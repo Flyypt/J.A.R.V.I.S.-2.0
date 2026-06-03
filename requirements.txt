@@ -6,3 +6,5 @@ sounddevice
 pyautogui
 pyperclip
 Pillow
+numpy
+pynut
