@@ -36,11 +36,33 @@ import pyperclip
 import sounddevice as sd
 import queue
 
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+
+try:
+    from pynput.keyboard import GlobalHotKeys
+    HAS_PYNPUT = True
+except ImportError:
+    HAS_PYNPUT = False
+
+import logging
+from logging.handlers import RotatingFileHandler
+import tempfile
+import base64
+import difflib
+
+# Add QSystemTrayIcon and QMenu to your QtWidgets import
+from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu
 from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt
-from PyQt6.QtWidgets import QApplication, QMainWindow
 from PyQt6.QtWebEngineCore import QWebEngineProfile
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebChannel import QWebChannel
+
+# ADD THIS LINE for QIcon
+from PyQt6.QtGui import QIcon
 
 from google import genai
 from google.genai import types
@@ -49,6 +71,77 @@ from google.genai import types
 # CONFIGURATION & PATH SETUP
 # ==========================================
 BASE_DIR = Path(__file__).resolve().parent
+
+# Logging setup
+logger = logging.getLogger("jarvis")
+logger.setLevel(logging.DEBUG)
+
+def _setup_logging():
+    log_file = BASE_DIR / "jarvis.log"
+    fh = RotatingFileHandler(log_file, maxBytes=5*1024*1024, backupCount=3, encoding="utf-8")
+    fh.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(fh)
+    ch = logging.StreamHandler()
+    ch.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    logger.addHandler(ch)
+
+_setup_logging()
+
+# Config
+# Config
+MODEL_POOL = [
+    "gemini-2.5-flash", 
+    "gemini-2.5-pro"
+]
+
+CONFIG_PATH = BASE_DIR / "jarvis_config.json"
+DEFAULT_CONFIG = {
+    "gemini_api_key": "",
+    "model": MODEL_POOL[0],  # This will now correctly resolve to "gemini-2.5-flash"
+    "voice_enabled": False,
+    "mic_enabled": False,
+    "audio_output_device": None,
+    "audio_input_device": None,
+    "confirm_dangerous": True,
+    "startup_minimized": False,
+    "global_hotkey": "ctrl+alt+j",
+    "max_history": 50,
+    "volume": 1.0,
+}
+CONFIG_PATH = BASE_DIR / "jarvis_config.json"
+DEFAULT_CONFIG = {
+    "gemini_api_key": "",
+    "model": MODEL_POOL[0],
+    "voice_enabled": False,
+    "mic_enabled": False,
+    "audio_output_device": None,
+    "audio_input_device": None,
+    "confirm_dangerous": True,
+    "startup_minimized": False,
+    "global_hotkey": "ctrl+alt+j",
+    "max_history": 50,
+    "volume": 1.0,
+}
+
+def load_config():
+    if CONFIG_PATH.exists():
+        try:
+            with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                merged = dict(DEFAULT_CONFIG)
+                merged.update(loaded)
+                return merged
+        except Exception as e:
+            logger.warning(f"Config load failed: {e}")
+    return dict(DEFAULT_CONFIG)
+
+def save_config(cfg):
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+            json.dump(cfg, f, indent=2)
+    except Exception as e:
+        logger.error(f"Config save failed: {e}")
+
 API_CONFIG_PATH = BASE_DIR / "api_keys.json"
 
 MODEL_POOL = [
@@ -61,6 +154,7 @@ MAX_PENDING = 50
 AUDIO_SR_OUT = 24000
 AUDIO_SR_IN = 16000
 TELEMETRY_INTERVAL_MS = 1000
+DANGEROUS_TOOLS = {"execute_shell", "write_file", "move_file", "delete_file", "apply_diff"}
 
 SYSTEM_PROMPT = """You are J.A.R.V.I.S. (Just A Rather Very Intelligent System), Tony Stark's personal AI assistant.
 You are operating inside a secure local core matrix with direct system-level tool access.
@@ -400,13 +494,56 @@ JARVIS_TOOLS = [
     ),
     types.FunctionDeclaration(
         name="focus_window",
-        description="USE THIS to switch to or focus a window by title substring. Example: 'switch to Chrome' → focus_window(title='Chrome'). Windows-only.",
+        description="USE THIS to switch to or focus a window by title substring. Example: 'switch to Chrome' → focus_window(title='Chrome'). Cross-platform (Windows native, Linux via xdotool/wmctrl, macOS via AppleScript).",
         parameters=types.Schema(
             type="OBJECT",
             properties={
                 "title": types.Schema(type="STRING", description="Substring of the window title (case-insensitive). E.g. 'Chrome'.")
             },
             required=["title"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="delete_file",
+        description="Permanently delete a file or empty directory. REQUIRES USER CONFIRMATION if confirm_dangerous is enabled.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"path": types.Schema(type="STRING", description="Path to delete.")},
+            required=["path"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="append_file",
+        description="Append text to the end of a file. Creates the file if it does not exist.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(type="STRING", description="File path."),
+                "content": types.Schema(type="STRING", description="Text to append.")
+            },
+            required=["path", "content"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="apply_diff",
+        description="Apply a precise edit to a file by replacing old_string with new_string. The old_string must match exactly (including whitespace). A backup is created automatically.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(type="STRING", description="File path."),
+                "old_string": types.Schema(type="STRING", description="Exact text to replace."),
+                "new_string": types.Schema(type="STRING", description="Replacement text.")
+            },
+            required=["path", "old_string", "new_string"]
+        )
+    ),
+    types.FunctionDeclaration(
+        name="read_image",
+        description="Read an image from disk and transmit it to the model for visual analysis. Supports PNG, JPG, WEBP, GIF.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={"path": types.Schema(type="STRING", description="Path to image file.")},
+            required=["path"]
         )
     ),
 ]
@@ -846,12 +983,77 @@ UI_HTML = """
             0%, 100% { opacity: 0.5; }
             50%      { opacity: 0.8; }
         }
+
+        /* Approval modal */
+        #approval-modal {
+            position: fixed; inset: 0; background: rgba(2,5,15,0.92);
+            z-index: 950; display: none; align-items: center; justify-content: center;
+            backdrop-filter: blur(8px);
+        }
+        .approval-card {
+            background: var(--jarvis-panel); border: 1px solid var(--jarvis-border);
+            padding: 28px 32px; border-radius: 12px; max-width: 520px; width: 90%;
+            box-shadow: 0 0 50px rgba(0,212,255,0.12);
+        }
+        .approval-title {
+            font-family: var(--font-display); font-size: 12px; letter-spacing: 3px;
+            color: var(--jarvis-cyan); margin-bottom: 14px;
+        }
+        .approval-tool {
+            font-family: var(--font-mono); font-size: 11px; color: #fff; margin-bottom: 6px;
+        }
+        .approval-args {
+            background: rgba(2,8,18,0.6); border: 1px solid var(--jarvis-border);
+            padding: 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 10px;
+            color: var(--text-dim); max-height: 220px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word; margin-bottom: 20px;
+        }
+        .approval-btns { display: flex; gap: 12px; justify-content: flex-end; }
+        .btn-deny {
+            background: rgba(255,77,77,0.08); border: 1px solid rgba(255,77,77,0.35);
+            color: #ff4d4d; padding: 8px 22px; border-radius: 6px; cursor: pointer;
+            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
+            transition: all 0.3s;
+        }
+        .btn-deny:hover { background: rgba(255,77,77,0.2); }
+        .btn-auth {
+            background: rgba(0,212,255,0.08); border: 1px solid var(--jarvis-cyan);
+            color: var(--jarvis-cyan); padding: 8px 22px; border-radius: 6px; cursor: pointer;
+            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
+            transition: all 0.3s;
+        }
+        .btn-auth:hover { background: var(--jarvis-cyan); color: var(--jarvis-dark); }
+
+        /* Volume slider */
+        input[type=range] {
+            -webkit-appearance: none; appearance: none;
+            background: transparent; cursor: pointer; width: 70px;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            height: 3px; background: rgba(0,212,255,0.15); border-radius: 2px;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--jarvis-cyan); margin-top: -3.5px;
+            box-shadow: 0 0 6px var(--jarvis-cyan);
+        }
+        input[type=range]::-moz-range-track {
+            height: 3px; background: rgba(0,212,255,0.15); border-radius: 2px;
+        }
+        input[type=range]::-moz-range-thumb {
+            width: 10px; height: 10px; border-radius: 50%; border: none;
+            background: var(--jarvis-cyan); box-shadow: 0 0 6px var(--jarvis-cyan);
+        }
     </style>
         <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script>
         // CRITICAL: Always dismiss boot screen after 3 seconds, no matter what
         setTimeout(function() {
-            setBootDone();
+            bridge.approvalRequested.connect((id, tool, args) => showApprovalModal(id, tool, args));
+        bridge.audioDevicesListed.connect((json) => populateAudioDevices(JSON.parse(json)));
+        bridge.configPushed.connect((json) => applyConfig(JSON.parse(json)));
+        setBootDone();
         }, 3000);
 
         let bridge = null;
@@ -952,10 +1154,77 @@ function initBridge() {
         bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
         bridge.toastReceived.connect((m, t) => showToast(m, t));
         setStatus('READY');
+        bridge.approvalRequested.connect((id, tool, args) => showApprovalModal(id, tool, args));
+        bridge.audioDevicesListed.connect((json) => populateAudioDevices(JSON.parse(json)));
+        bridge.configPushed.connect((json) => applyConfig(JSON.parse(json)));
         setBootDone();
         bridge.onBridgeReady();
     });
 }
+
+
+        // ============================================
+        // APPROVAL SYSTEM
+        // ============================================
+        let pendingApprovalId = null;
+        function showApprovalModal(id, tool, args) {
+            pendingApprovalId = id;
+            document.getElementById('approval-tool').innerText = tool;
+            try {
+                document.getElementById('approval-args').innerText = JSON.stringify(JSON.parse(args), null, 2);
+            } catch(e) {
+                document.getElementById('approval-args').innerText = args;
+            }
+            document.getElementById('approval-modal').style.display = 'flex';
+        }
+        function sendApproval(approved) {
+            if (pendingApprovalId && bridge) bridge.approvalResponse(pendingApprovalId, approved);
+            document.getElementById('approval-modal').style.display = 'none';
+            pendingApprovalId = null;
+        }
+
+        // ============================================
+        // AUDIO DEVICES & CONFIG
+        // ============================================
+        function populateAudioDevices(data) {
+            const outSel = document.getElementById('audio-out-select');
+            const inSel = document.getElementById('audio-in-select');
+            if (outSel) {
+                const cur = outSel.value;
+                outSel.innerHTML = '<option value="">Default</option>' +
+                    data.outputs.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+                if ([...outSel.options].some(o => o.value === cur)) outSel.value = cur;
+            }
+            if (inSel) {
+                const cur = inSel.value;
+                inSel.innerHTML = '<option value="">Default</option>' +
+                    data.inputs.map(d => `<option value="${d.id}">${d.name}</option>`).join('');
+                if ([...inSel.options].some(o => o.value === cur)) inSel.value = cur;
+            }
+        }
+        function applyConfig(cfg) {
+            const voiceToggle = document.getElementById('voice-toggle');
+            const volSlider = document.getElementById('vol-slider');
+            const outSel = document.getElementById('audio-out-select');
+            const inSel = document.getElementById('audio-in-select');
+            if (voiceToggle) voiceToggle.checked = !!cfg.voice_enabled;
+            if (volSlider) volSlider.value = cfg.volume || 1.0;
+            if (outSel && cfg.audio_output_device !== null && cfg.audio_output_device !== undefined) {
+                if ([...outSel.options].some(o => o.value === String(cfg.audio_output_device))) outSel.value = String(cfg.audio_output_device);
+            }
+            if (inSel && cfg.audio_input_device !== null && cfg.audio_input_device !== undefined) {
+                if ([...inSel.options].some(o => o.value === String(cfg.audio_input_device))) inSel.value = String(cfg.audio_input_device);
+            }
+        }
+
+        // ============================================
+        // EXPORT & IMAGE
+        // ============================================
+        function exportChat() {
+            const defaultName = "JARVIS_Chat_" + new Date().toISOString().slice(0,19).replace(/[:T]/g,"-") + ".md";
+            const path = prompt("Export chat to path:", "~/Documents/" + defaultName);
+            if (path && bridge) bridge.exportChat(path);
+        }
 
         document.addEventListener('DOMContentLoaded', function() {
             initBridge();
@@ -1410,7 +1679,69 @@ function initBridge() {
                 <style>
                     #voice-toggle:checked ~ .voice-track { background: rgba(0,212,255,0.25) !important; border-color: var(--jarvis-cyan) !important; }
                     #voice-toggle:checked ~ .voice-slider { transform: translateX(18px); background: var(--jarvis-cyan) !important; box-shadow: 0 0 6px var(--jarvis-cyan); }
-                </style>
+            
+        /* Approval modal */
+        #approval-modal {
+            position: fixed; inset: 0; background: rgba(2,5,15,0.92);
+            z-index: 950; display: none; align-items: center; justify-content: center;
+            backdrop-filter: blur(8px);
+        }
+        .approval-card {
+            background: var(--jarvis-panel); border: 1px solid var(--jarvis-border);
+            padding: 28px 32px; border-radius: 12px; max-width: 520px; width: 90%;
+            box-shadow: 0 0 50px rgba(0,212,255,0.12);
+        }
+        .approval-title {
+            font-family: var(--font-display); font-size: 12px; letter-spacing: 3px;
+            color: var(--jarvis-cyan); margin-bottom: 14px;
+        }
+        .approval-tool {
+            font-family: var(--font-mono); font-size: 11px; color: #fff; margin-bottom: 6px;
+        }
+        .approval-args {
+            background: rgba(2,8,18,0.6); border: 1px solid var(--jarvis-border);
+            padding: 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 10px;
+            color: var(--text-dim); max-height: 220px; overflow: auto;
+            white-space: pre-wrap; word-break: break-word; margin-bottom: 20px;
+        }
+        .approval-btns { display: flex; gap: 12px; justify-content: flex-end; }
+        .btn-deny {
+            background: rgba(255,77,77,0.08); border: 1px solid rgba(255,77,77,0.35);
+            color: #ff4d4d; padding: 8px 22px; border-radius: 6px; cursor: pointer;
+            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
+            transition: all 0.3s;
+        }
+        .btn-deny:hover { background: rgba(255,77,77,0.2); }
+        .btn-auth {
+            background: rgba(0,212,255,0.08); border: 1px solid var(--jarvis-cyan);
+            color: var(--jarvis-cyan); padding: 8px 22px; border-radius: 6px; cursor: pointer;
+            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
+            transition: all 0.3s;
+        }
+        .btn-auth:hover { background: var(--jarvis-cyan); color: var(--jarvis-dark); }
+
+        /* Volume slider */
+        input[type=range] {
+            -webkit-appearance: none; appearance: none;
+            background: transparent; cursor: pointer; width: 70px;
+        }
+        input[type=range]::-webkit-slider-runnable-track {
+            height: 3px; background: rgba(0,212,255,0.15); border-radius: 2px;
+        }
+        input[type=range]::-webkit-slider-thumb {
+            -webkit-appearance: none; appearance: none;
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--jarvis-cyan); margin-top: -3.5px;
+            box-shadow: 0 0 6px var(--jarvis-cyan);
+        }
+        input[type=range]::-moz-range-track {
+            height: 3px; background: rgba(0,212,255,0.15); border-radius: 2px;
+        }
+        input[type=range]::-moz-range-thumb {
+            width: 10px; height: 10px; border-radius: 50%; border: none;
+            background: var(--jarvis-cyan); box-shadow: 0 0 6px var(--jarvis-cyan);
+        }
+    </style>
             </div>
             <button id="mic-btn" class="hud-btn mic-btn-inactive" onclick="toggleMic()" disabled>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v4M8 23h8"/></svg>
@@ -1430,6 +1761,18 @@ function initBridge() {
             </button>
         </div>
     </footer>
+
+    <div id="approval-modal">
+        <div class="approval-card">
+            <div class="approval-title">EXECUTION REQUEST</div>
+            <div class="approval-tool" id="approval-tool"></div>
+            <pre class="approval-args" id="approval-args"></pre>
+            <div class="approval-btns">
+                <button class="btn-deny" onclick="sendApproval(false)">DENY</button>
+                <button class="btn-auth" onclick="sendApproval(true)">AUTHORIZE</button>
+            </div>
+        </div>
+    </div>
 </body>
 </html>
 """
@@ -1446,6 +1789,18 @@ class AudioPlayer:
         self._active = False
         self.on_level = on_level
         self._lock = threading.Lock()
+        self.volume = 1.0
+        self._device = None  # None = default
+
+    def set_volume(self, v: float):
+        self.volume = max(0.0, min(2.0, float(v)))
+
+    def set_device(self, device_id: Optional[int]):
+        self._device = device_id
+        # Restart if active
+        if self._active:
+            self.stop()
+            self.start()
 
     def start(self):
         def callback(outdata, frames, time_info, status):
@@ -1458,6 +1813,11 @@ class AudioPlayer:
                         break
                 if len(self._buffer) >= needed:
                     chunk = self._buffer[:needed]
+                    # Apply volume
+                    if HAS_NUMPY and self.volume != 1.0:
+                        arr = np.frombuffer(chunk, dtype=np.int16).astype(np.float32)
+                        arr = np.clip(arr * self.volume, -32768, 32767).astype(np.int16)
+                        chunk = arr.tobytes()
                     outdata[:] = chunk
                     self._buffer = self._buffer[needed:]
                     if self.on_level:
@@ -1470,13 +1830,14 @@ class AudioPlayer:
                     self._buffer = b''
 
         try:
-            self._stream = sd.RawOutputStream(
-                samplerate=AUDIO_SR_OUT, channels=1, dtype='int16', callback=callback
-            )
+            kwargs = {"samplerate": AUDIO_SR_OUT, "channels": 1, "dtype": "int16", "callback": callback}
+            if self._device is not None:
+                kwargs["device"] = self._device
+            self._stream = sd.RawOutputStream(**kwargs)
             self._stream.start()
             self._active = True
         except Exception as e:
-            print(f"[AudioPlayer] Init error: {e}")
+            logger.error(f"[AudioPlayer] Init error: {e}")
 
     def feed(self, data: bytes):
         if self._active:
@@ -1512,6 +1873,13 @@ class AudioRecorder:
         self._active = False
         self._accumulator = bytearray()
         self._last_flush = 0.0
+        self._device = None
+
+    def set_device(self, device_id: Optional[int]):
+        self._device = device_id
+        if self._active:
+            self.stop()
+            self.start()
 
     def start(self):
         def callback(indata, frames, time_info, status):
@@ -1529,14 +1897,15 @@ class AudioRecorder:
                     self._last_flush = now
 
         try:
-            self._stream = sd.RawInputStream(
-                samplerate=AUDIO_SR_IN, channels=1, dtype='int16', callback=callback
-            )
+            kwargs = {"samplerate": AUDIO_SR_IN, "channels": 1, "dtype": "int16", "callback": callback}
+            if self._device is not None:
+                kwargs["device"] = self._device
+            self._stream = sd.RawInputStream(**kwargs)
             self._stream.start()
             self._active = True
             self._last_flush = time.time()
         except Exception as e:
-            print(f"[AudioRecorder] Init error: {e}")
+            logger.error(f"[AudioRecorder] Init error: {e}")
 
     def stop(self):
         self._active = False
@@ -1609,7 +1978,7 @@ class TelemetryWorker(QThread):
             except Exception as e:
                 # Surface errors to stderr so silent worker death is debuggable.
                 # (We keep going — telemetry is best-effort.)
-                print(f"[Telemetry] tick error: {e}")
+                logger.error(f"[Telemetry] tick error: {e}")
             self.msleep(TELEMETRY_INTERVAL_MS)
 
     def _get_disk_pct(self):
@@ -1656,6 +2025,9 @@ class PyBridge(QObject):
     modelSwitched = pyqtSignal(str, bool)
     audioLevelUpdated = pyqtSignal(float)
     toastReceived = pyqtSignal(str, str)
+    approvalRequested = pyqtSignal(str, str, str)
+    audioDevicesListed = pyqtSignal(str)
+    configPushed = pyqtSignal(str)
 
     def __init__(self, window_handle):
         super().__init__()
@@ -1671,6 +2043,9 @@ class PyBridge(QObject):
         self.window.ui_ready = True
         self.logReceived.emit("JARVIS", "Neural matrix online. All systems nominal. Awaiting your command, Sir.")
         self.telemetryUpdated.emit(0, 0, 0, "0.0 B/s", "0.0 B/s", "System Idle")
+        # Push config and audio devices to UI
+        self.window.push_config_to_ui()
+        self.window.list_audio_devices()
         self.window.start_core()
 
     @pyqtSlot(str)
@@ -1678,11 +2053,15 @@ class PyBridge(QObject):
         enabled = enabled_str.lower() == "true"
         if self.window.core:
             self.window.core.set_voice_mode(enabled)
+        self.window.config["voice_enabled"] = enabled
+        save_config(self.window.config)
 
     @pyqtSlot(str)
     def changeModel(self, model_name):
         if self.window.core:
             self.window.core.change_model(model_name)
+        self.window.config["model"] = model_name
+        save_config(self.window.config)
 
     @pyqtSlot()
     def triggerReconnect(self):
@@ -1697,6 +2076,51 @@ class PyBridge(QObject):
     @pyqtSlot(bool)
     def setMicActive(self, active):
         self.window.set_mic_active(active)
+        self.window.config["mic_enabled"] = active
+        save_config(self.window.config)
+
+    @pyqtSlot(str, bool)
+    def approvalResponse(self, req_id: str, approved: bool):
+        if self.window.core:
+            self.window.core.resolve_approval(req_id, approved)
+
+    @pyqtSlot(str, str)
+    def setAudioDevice(self, kind: str, device_str: str):
+        try:
+            dev_id = int(device_str) if device_str else None
+        except (ValueError, TypeError):
+            dev_id = None
+        if self.window.core:
+            if kind == "output":
+                self.window.core.audio_player.set_device(dev_id)
+                self.window.config["audio_output_device"] = dev_id
+            else:
+                if self.window.core.audio_recorder:
+                    self.window.core.audio_recorder.set_device(dev_id)
+                self.window.config["audio_input_device"] = dev_id
+        save_config(self.window.config)
+
+    @pyqtSlot(float)
+    def setVolume(self, volume: float):
+        if self.window.core:
+            self.window.core.audio_player.set_volume(volume)
+        self.window.config["volume"] = volume
+        save_config(self.window.config)
+
+    @pyqtSlot()
+    def requestImagePick(self):
+        from PyQt6.QtWidgets import QFileDialog
+        path, _ = QFileDialog.getOpenFileName(
+            self.window, "Select Image", str(Path.home()),
+            "Images (*.png *.jpg *.jpeg *.webp *.gif)"
+        )
+        if path and self.window.core:
+            self.window.core._tool_read_image(path)
+
+    @pyqtSlot(str)
+    def exportChat(self, path: str):
+        if self.window.core:
+            self.window.core.export_chat(path)
 
 
 # ==========================================
@@ -1735,12 +2159,13 @@ class ResponseWatchdog:
         try:
             self.callback()
         except Exception as e:
-            print(f"[Watchdog] callback error: {e}")
+            logger.error(f"[Watchdog] callback error: {e}")
 
 
 class JarvisCore:
-    def __init__(self, bridge: PyBridge):
+    def __init__(self, bridge: PyBridge, config: dict = None):
         self.bridge = bridge
+        self.config = config or {}
         self.loop = asyncio.new_event_loop()
         self.thread = threading.Thread(target=self._run_loop, daemon=True, name="JarvisAsync")
 
@@ -1775,6 +2200,11 @@ class JarvisCore:
         self.context_tokens = 0
         self.context_chars = 0
 
+        # Approval system for dangerous tools
+        self._approval_lock = threading.Lock()
+        self._approval_counter = 0
+        self._pending_approvals: Dict[str, asyncio.Future] = {}
+
         self._api_key = self._load_api_key()
         if self._api_key:
             self.client = genai.Client(api_key=self._api_key)
@@ -1790,7 +2220,7 @@ class JarvisCore:
         try:
             self.loop.run_until_complete(self._main_loop())
         except Exception as e:
-            print(f"[JarvisCore] Loop fatal: {e}")
+            logger.error(f"[JarvisCore] Loop fatal: {e}")
 
     async def _main_loop(self):
         self.set_state("BOOT")
@@ -1851,6 +2281,33 @@ class JarvisCore:
         except Exception as e:
             self._emit_log("SYSTEM", f"{desc} schedule error: {e}")
             return None
+
+    def resolve_approval(self, req_id: str, approved: bool):
+        """Called from the Qt thread when the user approves/denies a tool."""
+        with self._approval_lock:
+            future = self._pending_approvals.pop(req_id, None)
+        if future and not future.done():
+            self.loop.call_soon_threadsafe(future.set_result, approved)
+
+    async def _request_approval(self, tool_name: str, args: dict) -> bool:
+        """Request user approval for a dangerous tool. Returns True if approved."""
+        if not self.config.get("confirm_dangerous", True):
+            return True
+        with self._approval_lock:
+            self._approval_counter += 1
+            req_id = f"approval_{self._approval_counter}_{threading.current_thread().ident}"
+            future = self.loop.create_future()
+            self._pending_approvals[req_id] = future
+        try:
+            self.bridge.approvalRequested.emit(req_id, tool_name, json.dumps(args))
+            # Wait up to 60 seconds for user response
+            return await asyncio.wait_for(future, timeout=60.0)
+        except asyncio.TimeoutError:
+            self._emit_log("SYSTEM", f"Approval for {tool_name} timed out (60s). Denied.")
+            return False
+        finally:
+            with self._approval_lock:
+                self._pending_approvals.pop(req_id, None)
 
     def _load_api_key(self):
         if API_CONFIG_PATH.exists():
@@ -2120,6 +2577,28 @@ class JarvisCore:
         self.trigger_reconnect()
         self._emit_log("SYSTEM", "Neural matrix fully purged. Fresh session initiated.")
 
+    def export_chat(self, path: str):
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with self._history_lock:
+                lines = ["# J.A.R.V.I.S. Chat Export\n"]
+                lines.append(f"Session: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
+                for entry in self.history:
+                    txt = ''.join(p.text for p in entry.parts if hasattr(p, 'text') and p.text)
+                    if not txt.strip():
+                        continue
+                    role = entry.role.upper()
+                    if role == "MODEL":
+                        role = "JARVIS"
+                    lines.append(f"## {role}")
+                    lines.append(txt)
+                    lines.append("")
+            target.write_text("\n".join(lines), encoding="utf-8")
+            self._emit_log("SYSTEM", f"Chat exported to {target}")
+        except Exception as e:
+            self._emit_log("SYSTEM", f"Export failed: {e}")
+
     def stop(self):
         self._shutdown = True
         self.watchdog.stop()
@@ -2368,6 +2847,25 @@ class JarvisCore:
         name = call.name
         args = call.args or {}
         call_id = call.id
+
+        # Approval gate for dangerous tools
+        if name in DANGEROUS_TOOLS:
+            approved = await self._request_approval(name, args)
+            if not approved:
+                self._emit_log("SYSTEM", f"Protocol '{name}' denied by user.")
+                if self.session and self.session_ready.is_set():
+                    try:
+                        await asyncio.wait_for(
+                            self.session.send_tool_response(
+                                function_responses=[types.FunctionResponse(
+                                    name=name, id=call_id, response={"result": "User denied execution."}
+                                )]
+                            ), timeout=10.0
+                        )
+                    except Exception:
+                        pass
+                return
+
         self._emit_log("ACTION", f"Executing protocol: {name}...")
 
         result = ""
@@ -2509,6 +3007,19 @@ class JarvisCore:
             elif name == "focus_window":
                 result = await asyncio.to_thread(self._tool_focus_window, args.get("title", ""))
 
+            elif name == "delete_file":
+                result = await asyncio.to_thread(self._tool_delete_file, args.get("path", ""))
+            elif name == "append_file":
+                result = await asyncio.to_thread(
+                    self._tool_append_file, args.get("path", ""), args.get("content", "")
+                )
+            elif name == "apply_diff":
+                result = await asyncio.to_thread(
+                    self._tool_apply_diff,
+                    args.get("path", ""), args.get("old_string", ""), args.get("new_string", "")
+                )
+            elif name == "read_image":
+                result = await asyncio.to_thread(self._tool_read_image, args.get("path", ""))
             else:
                 result = f"Unknown protocol: {name}"
         except Exception as e:
@@ -3214,46 +3725,212 @@ class JarvisCore:
             return f"Could not read active window: {e}"
 
     def _tool_focus_window(self, title: str) -> str:
-        """Bring a window to front by title substring (Windows-only)."""
-        if os.name != "nt":
-            return "[focus_window is only supported on Windows]"
+        """Bring a window to front by title substring. Cross-platform."""
         if not title or not title.strip():
             return "No title provided."
-        needle = title.lower().strip()
+        if os.name == "nt":
+            needle = title.lower().strip()
+            try:
+                user32 = ctypes.windll.user32
+                EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+                found = {"hwnd": None, "title": ""}
 
+                def _cb(hwnd, _lParam):
+                    try:
+                        if not user32.IsWindowVisible(hwnd):
+                            return True
+                        length = user32.GetWindowTextLengthW(hwnd)
+                        if length == 0:
+                            return True
+                        buff = ctypes.create_unicode_buffer(length + 1)
+                        user32.GetWindowTextW(hwnd, buff, length + 1)
+                        if needle in buff.value.lower():
+                            found["hwnd"] = hwnd
+                            found["title"] = buff.value
+                            return False
+                    except Exception:
+                        pass
+                    return True
+
+                user32.EnumWindows(EnumWindowsProc(_cb), 0)
+                if found["hwnd"] is None:
+                    return f"No visible window with title containing '{title}'."
+                if user32.IsIconic(found["hwnd"]):
+                    user32.ShowWindow(found["hwnd"], 9)
+                user32.SetForegroundWindow(found["hwnd"])
+                return f"Focused window: {found['title']}"
+            except Exception as e:
+                return f"focus_window failed: {e}"
+        elif sys.platform == "darwin":
+            return _focus_window_macos(title)
+        else:
+            return _focus_window_linux(title)
+
+
+
+    # ==============================
+    # NEW TOOL IMPLEMENTATIONS
+    # ==============================
+
+    def _tool_delete_file(self, path: str):
+        """Permanently delete a file or empty directory."""
+        if not path:
+            return "No path provided."
         try:
-            user32 = ctypes.windll.user32
-            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
-            found = {"hwnd": None, "title": ""}
-
-            def _cb(hwnd, _lParam):
-                try:
-                    if not user32.IsWindowVisible(hwnd):
-                        return True
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    if length == 0:
-                        return True
-                    buff = ctypes.create_unicode_buffer(length + 1)
-                    user32.GetWindowTextW(hwnd, buff, length + 1)
-                    if needle in buff.value.lower():
-                        found["hwnd"] = hwnd
-                        found["title"] = buff.value
-                        return False  # stop enumeration
-                except Exception:
-                    pass
-                return True
-
-            user32.EnumWindows(EnumWindowsProc(_cb), 0)
-            if found["hwnd"] is None:
-                return f"No visible window with title containing '{title}'."
-
-            # Restore if minimized, then bring to front.
-            if user32.IsIconic(found["hwnd"]):
-                user32.ShowWindow(found["hwnd"], 9)  # SW_RESTORE
-            user32.SetForegroundWindow(found["hwnd"])
-            return f"Focused window: {found['title']}"
+            target = Path(_expand_user_path(path)).resolve()
         except Exception as e:
-            return f"focus_window failed: {e}"
+            return f"Invalid path: {e}"
+        if not target.exists():
+            return f"Path does not exist: {target}"
+        try:
+            if target.is_dir():
+                target.rmdir()  # only empty dirs
+                return f"Deleted directory: {target}"
+            else:
+                target.unlink()
+                return f"Deleted file: {target}"
+        except OSError as e:
+            return f"Delete failed: {e}"
+
+    def _tool_append_file(self, path: str, content_text: str):
+        """Append text to a file. Creates if missing."""
+        if not path:
+            return "No path provided."
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with open(target, "a", encoding="utf-8") as f:
+                f.write(content_text or "")
+        except PermissionError:
+            return f"Permission denied: {target}"
+        except Exception as e:
+            return f"Append failed: {e}"
+        return f"Appended {len(content_text or '')} chars to {target}."
+
+    def _tool_apply_diff(self, path: str, old_string: str, new_string: str):
+        """Replace old_string with new_string in a file. Creates backup."""
+        if not path:
+            return "No path provided."
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        if not target.exists():
+            return f"File does not exist: {target}"
+        if not target.is_file():
+            return f"Not a file: {target}"
+        try:
+            text = target.read_text(encoding="utf-8")
+        except Exception as e:
+            return f"Read failed: {e}"
+        if old_string not in text:
+            # Try normalizing line endings
+            normalized_text = text.replace("\r\n", "\n")
+            normalized_old = old_string.replace("\r\n", "\n")
+            if normalized_old in normalized_text:
+                text = normalized_text
+                old_string = normalized_old
+            else:
+                return "old_string not found in file. The text must match exactly (including whitespace)."
+        # Create backup
+        backup_dir = BASE_DIR / ".jarvis_backups"
+        backup_dir.mkdir(exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup = backup_dir / f"{target.name}.{ts}.bak"
+        try:
+            shutil.copy2(target, backup)
+        except Exception as e:
+            return f"Backup failed: {e}"
+        new_text = text.replace(old_string, new_string, 1)
+        if new_text == text:
+            return "Replacement had no effect."
+        try:
+            target.write_text(new_text, encoding="utf-8")
+        except Exception as e:
+            return f"Write failed: {e}"
+        return f"Applied diff to {target}. Backup: {backup}"
+
+    def _tool_read_image(self, path: str):
+        """Read an image and send it to the model for analysis."""
+        if not path:
+            return "No path provided."
+        try:
+            target = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        if not target.exists():
+            return f"File not found: {target}"
+        ext = target.suffix.lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".webp", ".gif"):
+            return f"Unsupported image format: {ext}. Use PNG, JPG, WEBP, or GIF."
+        mime_map = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                    ".webp": "image/webp", ".gif": "image/gif"}
+        mime = mime_map.get(ext, "image/jpeg")
+        try:
+            data = target.read_bytes()
+        except Exception as e:
+            return f"Read failed: {e}"
+        if self.session and self.session_ready.is_set():
+            self._schedule(
+                self.session.send_realtime_input(
+                    media=types.Blob(mime_type=mime, data=data)
+                ),
+                "Image upload"
+            )
+            return f"Image {target.name} transmitted for analysis."
+        return "No active session to send image."
+
+def _focus_window_linux(title: str) -> str:
+    """Focus a window on Linux using wmctrl or xdotool."""
+    try:
+        result = subprocess.run(
+            ["xdotool", "search", "--name", title, "windowactivate"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return f"Focused window matching '{title}' via xdotool."
+    except FileNotFoundError:
+        pass
+    try:
+        result = subprocess.run(
+            ["wmctrl", "-a", title],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return f"Focused window matching '{title}' via wmctrl."
+    except FileNotFoundError:
+        pass
+    return "[focus_window requires xdotool or wmctrl on Linux. Install one and retry.]"
+
+
+def _focus_window_macos(title: str) -> str:
+    """Focus a window on macOS via AppleScript."""
+    try:
+        safe_title = title.replace('"', '\\"')
+        script = f"""tell application "System Events"
+    set procList to every process whose name contains "{safe_title}"
+    if (count of procList) > 0 then
+        set frontmost of (item 1 of procList) to true
+        return "Focused: " & (name of (item 1 of procList))
+    else
+        return "No process matching {safe_title}"
+    end if
+end tell"""
+        result = subprocess.run(
+            ["osascript", "-e", script],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return f"AppleScript error: {result.stderr.strip()}"
+    except FileNotFoundError:
+        return "[focus_window requires osascript on macOS.]"
+    except Exception as e:
+        return f"macOS focus failed: {e}"
+
 
 
 # ==========================================
@@ -3705,6 +4382,7 @@ class JarvisMainWindow(QMainWindow):
         self.resize(1450, 900)
         self.ui_ready = False
         self.core: Optional[JarvisCore] = None
+        self.config = load_config()
 
         self.view = QWebEngineView()
         self.setCentralWidget(self.view)
@@ -3720,15 +4398,110 @@ class JarvisMainWindow(QMainWindow):
         self.telemetry.stats_updated.connect(self._update_stats)
         self.telemetry.start()
 
+        # System tray
+        self._setup_tray()
+
+        # Global hotkey
+        self._setup_global_hotkey()
+
+        # Apply startup config
+        if self.config.get("startup_minimized"):
+            QTimer.singleShot(500, self.hide)
+
+    def _setup_tray(self):
+        self.tray = QSystemTrayIcon(self)
+        self.tray.setToolTip("J.A.R.V.I.S. Core Matrix")
+        # Build a simple 64x64 icon programmatically since we may not have a resource file
+        from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+        pix = QPixmap(64, 64)
+        pix.fill(QColor("transparent"))
+        p = QPainter(pix)
+        p.setPen(QColor(0, 212, 255))
+        p.setBrush(QColor(0, 212, 255))
+        p.drawEllipse(8, 8, 48, 48)
+        p.setPen(QColor(2, 5, 15))
+        p.setFont(QFont("Orbitron", 20, QFont.Weight.Bold))
+        p.drawText(pix.rect(), Qt.AlignmentFlag.AlignCenter, "J")
+        p.end()
+        self.tray.setIcon(QIcon(pix))
+
+        menu = QMenu()
+        show_action = menu.addAction("Show")
+        show_action.triggered.connect(self.showNormal)
+        hide_action = menu.addAction("Hide")
+        hide_action.triggered.connect(self.hide)
+        menu.addSeparator()
+        quit_action = menu.addAction("Quit")
+        quit_action.triggered.connect(QApplication.quit)
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._tray_activated)
+        self.tray.show()
+
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
+            if self.isVisible():
+                self.hide()
+            else:
+                self.showNormal()
+                self.raise_()
+                self.activateWindow()
+
+    def _setup_global_hotkey(self):
+        if HAS_PYNPUT:
+            try:
+                hotkey_str = self.config.get("global_hotkey", "ctrl+alt+j")
+                self._hotkey_listener = GlobalHotKeys({
+                    hotkey_str: self._toggle_visibility
+                })
+                self._hotkey_listener.start()
+                logger.info(f"Global hotkey registered: {hotkey_str}")
+            except Exception as e:
+                logger.warning(f"Global hotkey setup failed: {e}")
+
+    def _toggle_visibility(self):
+        if self.isVisible() and self.isActiveWindow():
+            self.hide()
+        else:
+            self.showNormal()
+            self.raise_()
+            self.activateWindow()
+
     def start_core(self):
         if not self.core:
-            self.core = JarvisCore(self.bridge)
+            self.core = JarvisCore(self.bridge, self.config)
+            # Apply saved voice/mic state
+            if self.config.get("voice_enabled"):
+                self.core.set_voice_mode(True)
+            if self.config.get("mic_enabled"):
+                self.set_mic_active(True)
+            # Apply saved volume
+            vol = self.config.get("volume", 1.0)
+            self.core.audio_player.set_volume(vol)
+
+    def push_config_to_ui(self):
+        try:
+            self.bridge.configPushed.emit(json.dumps(self.config))
+        except Exception as e:
+            logger.warning(f"Config push failed: {e}")
+
+    def list_audio_devices(self):
+        try:
+            devices = sd.query_devices()
+            outputs = []
+            inputs = []
+            for i, d in enumerate(devices):
+                info = {"id": i, "name": d.get("name", f"Device {i}")}
+                if d.get("max_output_channels", 0) > 0:
+                    outputs.append(info)
+                if d.get("max_input_channels", 0) > 0:
+                    inputs.append(info)
+            payload = json.dumps({"outputs": outputs, "inputs": inputs})
+            self.bridge.audioDevicesListed.emit(payload)
+        except Exception as e:
+            logger.warning(f"Audio device listing failed: {e}")
 
     def _update_stats(self, cpu, mem_pct, disk_pct, net_in, net_out, win_title):
         if self.ui_ready and self.core:
-            # QWebChannel handles Python→JS string serialization automatically.
-            # Manual escaping (for JS string literals) was corrupting titles
-            # with backslashes or quotes in the UI.
             self.bridge.telemetryUpdated.emit(cpu, mem_pct, disk_pct, net_in, net_out, win_title)
 
     def set_mic_active(self, active):
@@ -3741,6 +4514,9 @@ class JarvisMainWindow(QMainWindow):
         self.telemetry.requestInterruption()
         self.telemetry.quit()
         self.telemetry.wait(3000)
+        # Stop global hotkey listener
+        if hasattr(self, "_hotkey_listener") and self._hotkey_listener:
+            self._hotkey_listener.stop()
         super().closeEvent(event)
 
 
