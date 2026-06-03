@@ -101,7 +101,7 @@ Most AI assistants are chatbots in a browser. **J.A.R.V.I.S. is different:**
 
 | Full HUD | Telemetry | Arc Reactor | Chat Log | Controls |
 |----------|-----------|-------------|----------|----------|
-| ![Full HUD](screenshots/hud_full.png) | ![Telemetry](screenshots/telemetry.png) | ![Reactor](screenshots/reactor.png) | ![Chat](screenshots/chat.png) | ![Controls](screenshots/controls.png) |
+| <img width="1365" height="705" alt="image" src="https://github.com/user-attachments/assets/6257227c-1f80-43c9-b819-0b7f7ababb64" /> | <img width="331" height="493" alt="image" src="https://github.com/user-attachments/assets/c8bd8cf5-cc4a-4010-9645-3a66602a3d0e" /> | <img width="580" height="490" alt="image" src="https://github.com/user-attachments/assets/d0756cb4-f340-4ffd-9e53-c1ba76ecefd8" /> |  <img width="468" height="489" alt="image" src="https://github.com/user-attachments/assets/92c53060-ae91-4f0f-a3e6-cbdc16612177" /> | <img width="1363" height="132" alt="image" src="https://github.com/user-attachments/assets/feab2264-1b52-442c-90ae-fdd238f3d175" /> |
 
 ---
 
