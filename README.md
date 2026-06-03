@@ -46,7 +46,7 @@ Most AI assistants are chatbots in a browser. **J.A.R.V.I.S. is different:**
 
 ## Demo
 
-> *Add a 5-10 second GIF here showing the arc reactor pulsing + typing a command. This is the #1 driver of GitHub stars.*
+> 
 
 ---
 
