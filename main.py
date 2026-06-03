@@ -91,7 +91,7 @@ import tempfile
 import base64
 import difflib
 
-from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt, QEvent
+from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt, QEvent, QRect
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu, QFileDialog
 from PyQt6.QtGui import QIcon, QPixmap, QPainter, QColor, QFont
 from PyQt6.QtWebEngineCore import QWebEngineProfile
@@ -1337,8 +1337,14 @@ UI_HTML = """
             background: rgba(0, 212, 255, 0.15); border-color: var(--jarvis-cyan);
             box-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
         }
+        .theme-toggle:hover {
+            background: rgba(0, 212, 255, 0.15); border-color: var(--jarvis-cyan);
+            box-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
+        }
         .quick-actions {
-            position: fixed; top: 46px; left: 18px; z-index: 100;
+            position: fixed; top: 46px; left: 50%; transform: translateX(-50%);
+            margin-left: 180px;  /* shift right from center */
+            z-index: 100;
             display: flex; gap: 6px;
         }
         .quick-btn {
@@ -1355,6 +1361,7 @@ UI_HTML = """
         }
         .conn-indicator {
             position: fixed; top: 46px; left: 50%; transform: translateX(-50%);
+            margin-left: -200px;  /* shift left from center */
             z-index: 100; display: flex; align-items: center; gap: 8px;
             background: rgba(4, 14, 32, 0.75); border: 1px solid rgba(0, 212, 255, 0.15);
             padding: 5px 14px; border-radius: 14px; backdrop-filter: blur(10px);
@@ -1368,7 +1375,8 @@ UI_HTML = """
         .conn-dot.weak { background: #ffb703; box-shadow: 0 0 8px rgba(255, 183, 3, 0.5); }
         .conn-dot.dead { background: #ff4d4d; box-shadow: 0 0 8px rgba(255, 77, 77, 0.5); }
         .mem-bar {
-            position: fixed; top: 82px; left: 18px; z-index: 100;
+            position: fixed; top: 82px; left: 50%; transform: translateX(-50%);
+            margin-left: -200px; z-index: 100;
             font-family: var(--font-mono); font-size: 9px; color: var(--text-dim);
             letter-spacing: 1px; background: rgba(4, 14, 32, 0.6);
             border: 1px solid rgba(0, 212, 255, 0.1); padding: 4px 10px;
@@ -1489,21 +1497,32 @@ function initBridge() {
     new QWebChannel(qt.webChannelTransport, function(ch) {
         bridge = ch.objects.pyBridge;
         if (!bridge) {
-            setTimeout(initBridge, 200);
+            console.error("[BRIDGE] pyBridge object not found in QWebChannel");
+            setTimeout(initBridge, 500);
             return;
         }
+        console.log("[BRIDGE] Connected successfully");
+
+        // Connect all signals
         bridge.logReceived.connect((s, t) => appendLog(s, t, s==='JARVIS'));
         bridge.statusUpdated.connect((s) => setStatus(s));
         bridge.telemetryUpdated.connect((c, m, d, ni, no, w) => updateStats(c, m, d, ni, no, w));
         bridge.modelSwitched.connect((m, f) => updateModelBadge(m, f));
         bridge.audioLevelUpdated.connect((l) => updateAudioLevel(l));
         bridge.toastReceived.connect((m, t) => showToast(m, t));
-        setStatus('READY');
         bridge.approvalRequested.connect((id, tool, args) => showApprovalModal(id, tool, args));
         bridge.audioDevicesListed.connect((json) => populateAudioDevices(JSON.parse(json)));
         bridge.configPushed.connect((json) => applyConfig(JSON.parse(json)));
+
+        setStatus('READY');
         setBootDone();
-        bridge.onBridgeReady();
+
+        // Notify Python that bridge is ready
+        try {
+            bridge.onBridgeReady();
+        } catch(e) {
+            console.error("[BRIDGE] onBridgeReady failed:", e);
+        }
     });
 }
 
@@ -1568,13 +1587,17 @@ function initBridge() {
         function exportChat() {
             const defaultName = "JARVIS_Chat_" + new Date().toISOString().slice(0,19).replace(/[:T]/g,"-") + ".md";
             const path = prompt("Export chat to path:", "~/Documents/" + defaultName);
-            if (path && bridge) bridge.exportChat(path);
+            if (path) safeBridgeCall('exportChat', path);
         }
 
         function toggleTheme() {
             document.body.classList.toggle('light-theme');
             const isLight = document.body.classList.contains('light-theme');
-            localStorage.setItem('jarvis-theme', isLight ? 'light' : 'dark');
+            try {
+                localStorage.setItem('jarvis-theme', isLight ? 'light' : 'dark');
+            } catch(e) {
+                // localStorage may be disabled in data: URLs
+            }
         }
 
         function toggleVoiceMode() {
@@ -1586,7 +1609,7 @@ function initBridge() {
         }
 
         function showBookmarks() {
-            if (bridge) bridge.showBookmarks();
+            safeBridgeCall('showBookmarks');
         }
 
         function updateConnectionStatus(status, latency) {
@@ -1613,7 +1636,12 @@ function initBridge() {
 
         // Restore theme preference
         document.addEventListener('DOMContentLoaded', function() {
-            const savedTheme = localStorage.getItem('jarvis-theme');
+            let savedTheme = null;
+            try {
+                savedTheme = localStorage.getItem('jarvis-theme');
+            } catch(e) {
+                // localStorage is disabled in data: URLs (QWebEngineView setHtml)
+            }
             if (savedTheme === 'light') document.body.classList.add('light-theme');
             initBridge();
         });
@@ -1808,25 +1836,41 @@ function initBridge() {
         // ============================================
         // UI EVENT HANDLERS
         // ============================================
+        // Safe bridge caller - ensures bridge is ready before calling
+        function safeBridgeCall(fnName, ...args) {
+            if (!bridge) {
+                console.error("[BRIDGE] Cannot call " + fnName + " - bridge is null");
+                showToast("System not ready - please wait", "warn");
+                return;
+            }
+            try {
+                bridge[fnName](...args);
+            } catch(e) {
+                console.error("[BRIDGE] " + fnName + " failed:", e);
+            }
+        }
+
         function sendCmd() {
             const input = document.getElementById('cmd-input');
-            if (!input || !bridge) return;
+            if (!input || !bridge) {
+                console.error("[SEND] bridge is null or input missing");
+                return;
+            }
             const text = input.value.trim();
             if (!text) return;
             cmdHistory.push(text);
             if (cmdHistory.length > 50) cmdHistory.shift();
             cmdIndex = cmdHistory.length;
             bridge.submitCommand(text);
-            // UX: flash the input field to confirm send
             input.classList.add('cmd-sending');
             setTimeout(() => input.classList.remove('cmd-sending'), 400);
             input.value = '';
         }
 
-        function changeModel(v) { if (bridge) bridge.changeModel(v); }
+        function changeModel(v) { safeBridgeCall('changeModel', v); }
 
         function toggleVoice(checked) {
-            if (bridge) bridge.setVoiceModeEnabled(String(checked));
+            safeBridgeCall('setVoiceModeEnabled', String(checked));
             const mic = document.getElementById('mic-btn');
             if (mic) mic.disabled = !checked;
             if (!checked && micOn) toggleMic();
@@ -1839,11 +1883,11 @@ function initBridge() {
                 btn.classList.toggle('mic-active', micOn);
                 btn.classList.toggle('mic-btn-inactive', !micOn);
             }
-            if (bridge) bridge.setMicActive(micOn);
+            safeBridgeCall('setMicActive', micOn);
         }
 
-        function reconnectCore() { if (bridge) bridge.triggerReconnect(); }
-        function resetCore() { if (bridge) bridge.resetSession(); }
+        function reconnectCore() { safeBridgeCall('triggerReconnect'); }
+        function resetCore() { safeBridgeCall('resetSession'); }
 
         function clearLog() {
             finalizeJarvis();
@@ -1874,13 +1918,13 @@ function initBridge() {
             <span class="tb-sub">Core Matrix // Mark XLV</span>
         </div>
         <div class="tb-controls" role="toolbar" aria-label="Window controls">
-            <button class="tb-btn tb-min" onclick="bridge.minimizeWindow()" title="Minimize" aria-label="Minimize">
+            <button class="tb-btn tb-min" onclick="safeBridgeCall('minimizeWindow')" title="Minimize" aria-label="Minimize">
                 <svg viewBox="0 0 12 12" width="10" height="10"><line x1="2" y1="6" x2="10" y2="6" stroke="currentColor" stroke-width="1.2" stroke-linecap="round"/></svg>
             </button>
-            <button class="tb-btn tb-max" onclick="bridge.toggleMaximize()" title="Maximize" aria-label="Maximize">
+            <button class="tb-btn tb-max" onclick="safeBridgeCall('toggleMaximize')" title="Maximize" aria-label="Maximize">
                 <svg viewBox="0 0 12 12" width="10" height="10"><rect x="2.5" y="2.5" width="7" height="7" fill="none" stroke="currentColor" stroke-width="1.2"/></svg>
             </button>
-            <button class="tb-btn tb-close" onclick="bridge.closeWindow()" title="Close" aria-label="Close">
+            <button class="tb-btn tb-close" onclick="safeBridgeCall('closeWindow')" title="Close" aria-label="Close">
                 <svg viewBox="0 0 12 12" width="10" height="10">
                     <line x1="3" y1="3" x2="9" y2="9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
                     <line x1="9" y1="3" x2="3" y2="9" stroke="currentColor" stroke-width="1.3" stroke-linecap="round"/>
@@ -1892,8 +1936,8 @@ function initBridge() {
     <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">THEME</button>
 
     <div class="quick-actions">
-        <button class="quick-btn" onclick="bridge.requestImagePick()" title="Upload image">📷</button>
-        <button class="quick-btn" onclick="bridge.triggerReconnect()" title="Reconnect">🔄</button>
+        <button class="quick-btn" onclick="safeBridgeCall('requestImagePick')" title="Upload image">📷</button>
+        <button class="quick-btn" onclick="safeBridgeCall('triggerReconnect')" title="Reconnect">🔄</button>
         <button class="quick-btn" onclick="toggleVoiceMode()" title="Toggle voice">🎤</button>
         <button class="quick-btn" onclick="showBookmarks()" title="Bookmarks">🔖</button>
     </div>
@@ -2116,73 +2160,7 @@ function initBridge() {
                     <span class="voice-track" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.2);transition:.4s;border-radius:20px;"></span>
                     <span class="voice-slider" style="position:absolute;content:'';height:12px;width:12px;left:2px;bottom:2px;background:#5a7a99;transition:.4s;border-radius:50%;"></span>
                 </label>
-                <style>
-                    #voice-toggle:checked ~ .voice-track { background: rgba(0,212,255,0.25) !important; border-color: var(--jarvis-cyan) !important; }
-                    #voice-toggle:checked ~ .voice-slider { transform: translateX(18px); background: var(--jarvis-cyan) !important; box-shadow: 0 0 6px var(--jarvis-cyan); }
-            
-        /* Approval modal */
-        #approval-modal {
-            position: fixed; inset: 0; background: rgba(2,5,15,0.92);
-            z-index: 950; display: none; align-items: center; justify-content: center;
-            backdrop-filter: blur(8px);
-        }
-        .approval-card {
-            background: var(--jarvis-panel); border: 1px solid var(--jarvis-border);
-            padding: 28px 32px; border-radius: 12px; max-width: 520px; width: 90%;
-            box-shadow: 0 0 50px rgba(0,212,255,0.12);
-        }
-        .approval-title {
-            font-family: var(--font-display); font-size: 12px; letter-spacing: 3px;
-            color: var(--jarvis-cyan); margin-bottom: 14px;
-        }
-        .approval-tool {
-            font-family: var(--font-mono); font-size: 11px; color: #fff; margin-bottom: 6px;
-        }
-        .approval-args {
-            background: rgba(2,8,18,0.6); border: 1px solid var(--jarvis-border);
-            padding: 12px; border-radius: 6px; font-family: var(--font-mono); font-size: 10px;
-            color: var(--text-dim); max-height: 220px; overflow: auto;
-            white-space: pre-wrap; word-break: break-word; margin-bottom: 20px;
-        }
-        .approval-btns { display: flex; gap: 12px; justify-content: flex-end; }
-        .btn-deny {
-            background: rgba(255,77,77,0.08); border: 1px solid rgba(255,77,77,0.35);
-            color: #ff4d4d; padding: 8px 22px; border-radius: 6px; cursor: pointer;
-            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
-            transition: all 0.3s;
-        }
-        .btn-deny:hover { background: rgba(255,77,77,0.2); }
-        .btn-auth {
-            background: rgba(0,212,255,0.08); border: 1px solid var(--jarvis-cyan);
-            color: var(--jarvis-cyan); padding: 8px 22px; border-radius: 6px; cursor: pointer;
-            font-family: var(--font-display); font-size: 10px; letter-spacing: 1px;
-            transition: all 0.3s;
-        }
-        .btn-auth:hover { background: var(--jarvis-cyan); color: var(--jarvis-dark); }
-
-        /* Volume slider */
-        input[type=range] {
-            -webkit-appearance: none; appearance: none;
-            background: transparent; cursor: pointer; width: 70px;
-        }
-        input[type=range]::-webkit-slider-runnable-track {
-            height: 3px; background: rgba(0,212,255,0.15); border-radius: 2px;
-        }
-        input[type=range]::-webkit-slider-thumb {
-            -webkit-appearance: none; appearance: none;
-            width: 10px; height: 10px; border-radius: 50%;
-            background: var(--jarvis-cyan); margin-top: -3.5px;
-            box-shadow: 0 0 6px var(--jarvis-cyan);
-        }
-        input[type=range]::-moz-range-track {
-            height: 3px; background: rgba(0,212,255,0.15); border-radius: 2px;
-        }
-        input[type=range]::-moz-range-thumb {
-            width: 10px; height: 10px; border-radius: 50%; border: none;
-            background: var(--jarvis-cyan); box-shadow: 0 0 6px var(--jarvis-cyan);
-        }
-    </style>
-            </div>
+                </div>
             <button id="mic-btn" class="hud-btn mic-btn-inactive" onclick="toggleMic()" disabled>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v4M8 23h8"/></svg>
                 <span>MIC</span>
@@ -5410,16 +5388,17 @@ class JarvisMainWindow(QMainWindow):
         self.setCentralWidget(self.view)
         self.view.page().profile().setHttpCacheType(QWebEngineProfile.HttpCacheType.NoCache)
 
-        # Drag/resize cursor state for the frameless window
-        self.view.installEventFilter(self)
+        # Drag/resize handled via _title_bar_widget overlay (see _setup_drag_overlay)
         self.setMouseTracking(True)
-        self.view.setMouseTracking(True)
 
         self.bridge = PyBridge(self)
         self.channel = QWebChannel()
         self.channel.registerObject("pyBridge", self.bridge)
         self.view.page().setWebChannel(self.channel)
         self.view.setHtml(UI_HTML)
+
+        # Setup the drag overlay for frameless window controls
+        self._setup_drag_overlay()
 
         self.telemetry = TelemetryWorker()
         self.telemetry.stats_updated.connect(self._update_stats)
@@ -5436,60 +5415,99 @@ class JarvisMainWindow(QMainWindow):
             QTimer.singleShot(500, self.hide)
 
     # ------------------------------------------------------------------
-    # Frameless-window mouse handling
+    # Frameless-window mouse handling (PROPER overlay implementation)
     # ------------------------------------------------------------------
-    # The QWebEngineView swallows most mouse events, so we install an
-    # eventFilter on it. From there we:
-    #   * forward left-button drags on the top drag region to the window
-    #     via startSystemMove() (Qt 6 native snap-to-edge moves),
-    #   * forward double-clicks on the same region to toggle maximize,
-    #   * update the cursor when the user hovers near a window edge.
-    # Edge-resize itself is enabled through the WindowSystemMenuHint flag
-    # set in __init__, which lets Qt pick up the bottom/right edges.
+    # CRITICAL: QWebEngineView runs its own Chromium process that swallows
+    # ALL mouse events. eventFilter on the view NEVER fires for mouse clicks.
+    #
+    # PROPER SOLUTION: A transparent QWidget overlay sits ON TOP of the
+    # web view, covering the left portion of the title bar. The overlay
+    # captures mouse events for dragging. The right portion (buttons) is
+    # left uncovered so HTML clicks pass through to the web view.
     # ------------------------------------------------------------------
+
+    def _setup_drag_overlay(self):
+        """Create a transparent overlay widget for the title bar drag area.
+        The overlay covers the left portion of the title bar (brand/logo area)
+        and leaves the right portion (buttons) uncovered for HTML interaction."""
+        from PyQt6.QtWidgets import QWidget
+        from PyQt6.QtCore import Qt
+
+        # Title bar overlay widget - captures mouse events
+        self._title_bar = QWidget(self)
+        self._title_bar.setObjectName("titleBarOverlay")
+        # CRITICAL: Must be False to CAPTURE mouse events (not transparent to them)
+        self._title_bar.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, False)
+        self._title_bar.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self._title_bar.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self._title_bar.setStyleSheet("background: transparent; border: none;")
+        self._title_bar.setMouseTracking(True)
+        self._title_bar.show()
+        # CRITICAL: raise_() ensures the overlay is ABOVE the web view in z-order
+        self._title_bar.raise_()
+
+        # Install event filter on the overlay widget
+        self._title_bar.installEventFilter(self)
+
+        # Drag state
+        self._dragging = False
+        self._drag_start = None
+        self._drag_geo = None
+        self._resizing = False
+        self._resize_edge = None
+        self._resize_start = None
+        self._resize_geo = None
+
+    def _update_title_bar_geo(self):
+        """Position the overlay at the top of the window, covering the
+        left portion (drag handle) and leaving right ~130px for buttons."""
+        if hasattr(self, '_title_bar') and self._title_bar:
+            # Cover from left edge to just before the buttons
+            # Buttons start at ~width-130 (3 buttons * 30 + gaps + padding)
+            drag_width = max(150, self.width() - 130)
+            self._title_bar.setGeometry(0, 0, drag_width, self.DRAG_REGION_HEIGHT)
+            self._title_bar.raise_()  # Keep above web view
 
     def eventFilter(self, obj, event):
-        if obj is self.view:
-            t = event.type()
-            if t == QEvent.Type.MouseButtonPress:
-                pos = self._event_position(event)
-                if (event.button() == Qt.MouseButton.LeftButton
-                        and self._in_drag_region(event)
-                        and not self._over_window_control(pos)):
-                    window_handle = self.windowHandle()
-                    if window_handle is not None and window_handle.startSystemMove():
-                        event.accept()
-                        return True
-            elif t == QEvent.Type.MouseButtonDblClick:
-                if event.button() == Qt.MouseButton.LeftButton and self._in_drag_region(event):
-                    pos = self._event_position(event)
-                    if not self._over_window_control(pos):
-                        self._toggle_maximize()
-                        event.accept()
-                        return True
-            elif t == QEvent.Type.MouseMove:
-                self._update_cursor_for_position(self._event_position(event))
+        if obj is self._title_bar:
+            return self._handle_title_bar_event(event)
         return super().eventFilter(obj, event)
 
-    def _event_position(self, event):
-        try:
-            return event.position().toPoint()
-        except AttributeError:
-            return event.pos()
+    def _handle_title_bar_event(self, event):
+        t = event.type()
 
-    def _in_drag_region(self, event) -> bool:
-        y = self._event_position(event).y()
-        return 0 <= y < self.DRAG_REGION_HEIGHT
+        if t == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._dragging = True
+                self._drag_start = event.globalPosition().toPoint()
+                self._drag_geo = self.geometry()
+                event.accept()
+                return True
 
-    def _over_window_control(self, pos) -> bool:
-        """True if the click is on one of the min/max/close buttons in the
-        custom title bar. The buttons sit at the right edge of the title
-        strip and are 30x26 with a 2px gap. Matches the CSS in UI_HTML."""
-        if pos.y() >= self.DRAG_REGION_HEIGHT:
-            return False
-        # 3 buttons * 30 + 2 gaps * 2 + 8px right padding = 102
-        reserved = 3 * 30 + 2 * 2 + 8
-        return pos.x() >= self.view.width() - reserved
+        elif t == QEvent.Type.MouseButtonRelease:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._dragging = False
+                self._drag_start = None
+                self._drag_geo = None
+                event.accept()
+                return True
+
+        elif t == QEvent.Type.MouseMove:
+            if self._dragging and self._drag_start and self._drag_geo:
+                delta = event.globalPosition().toPoint() - self._drag_start
+                self.move(self._drag_geo.topLeft() + delta)
+                event.accept()
+                return True
+            # Show drag cursor when hovering the drag area
+            self._title_bar.setCursor(Qt.CursorShape.OpenHandCursor)
+
+        elif t == QEvent.Type.MouseButtonDblClick:
+            if event.button() == Qt.MouseButton.LeftButton:
+                self._toggle_maximize()
+                event.accept()
+                return True
+
+        return False
 
     def _toggle_maximize(self):
         if self.isMaximized() or self.isFullScreen():
@@ -5497,44 +5515,128 @@ class JarvisMainWindow(QMainWindow):
         else:
             self.showMaximized()
 
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_title_bar_geo()
+
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._update_title_bar_geo()
+
+    # Edge resize on main window (areas not covered by web view)
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            edge = self._hit_test_edge(event.position().toPoint())
+            if edge:
+                self._resizing = True
+                self._resize_edge = edge
+                self._resize_start = event.globalPosition().toPoint()
+                self._resize_geo = self.geometry()
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and self._resizing:
+            self._resizing = False
+            self._resize_edge = None
+            self._resize_start = None
+            self._resize_geo = None
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._resizing and self._resize_edge and self._resize_start:
+            delta = event.globalPosition().toPoint() - self._resize_start
+            geo = QRect(self._resize_geo)
+
+            if self._resize_edge == 'right':
+                geo.setWidth(max(self.minimumWidth(), geo.width() + delta.x()))
+            elif self._resize_edge == 'left':
+                new_w = max(self.minimumWidth(), geo.width() - delta.x())
+                geo.setLeft(geo.right() - new_w + 1)
+            elif self._resize_edge == 'bottom':
+                geo.setHeight(max(self.minimumHeight(), geo.height() + delta.y()))
+            elif self._resize_edge == 'top':
+                new_h = max(self.minimumHeight(), geo.height() - delta.y())
+                geo.setTop(geo.bottom() - new_h + 1)
+            elif self._resize_edge == 'bottom-right':
+                geo.setWidth(max(self.minimumWidth(), geo.width() + delta.x()))
+                geo.setHeight(max(self.minimumHeight(), geo.height() + delta.y()))
+            elif self._resize_edge == 'bottom-left':
+                new_w = max(self.minimumWidth(), geo.width() - delta.x())
+                geo.setLeft(geo.right() - new_w + 1)
+                geo.setHeight(max(self.minimumHeight(), geo.height() + delta.y()))
+            elif self._resize_edge == 'top-right':
+                geo.setWidth(max(self.minimumWidth(), geo.width() + delta.x()))
+                new_h = max(self.minimumHeight(), geo.height() - delta.y())
+                geo.setTop(geo.bottom() - new_h + 1)
+            elif self._resize_edge == 'top-left':
+                new_w = max(self.minimumWidth(), geo.width() - delta.x())
+                new_h = max(self.minimumHeight(), geo.height() - delta.y())
+                geo.setLeft(geo.right() - new_w + 1)
+                geo.setTop(geo.bottom() - new_h + 1)
+
+            self.setGeometry(geo)
+            event.accept()
+            return
+        else:
+            self._update_cursor_for_position(event.position().toPoint())
+        super().mouseMoveEvent(event)
+
+    def _hit_test_edge(self, pos):
+        """Return edge/corner for resize, or None."""
+        if self.isMaximized() or self.isFullScreen():
+            return None
+        m = self.RESIZE_MARGIN
+        x, y = pos.x(), pos.y()
+        w, h = self.width(), self.height()
+        on_l = x <= m
+        on_r = x >= w - m
+        on_t = y <= m
+        on_b = y >= h - m
+        if on_t and on_l: return 'top-left'
+        if on_t and on_r: return 'top-right'
+        if on_b and on_l: return 'bottom-left'
+        if on_b and on_r: return 'bottom-right'
+        if on_l: return 'left'
+        if on_r: return 'right'
+        if on_t: return 'top'
+        if on_b: return 'bottom'
+        return None
+
     def _update_cursor_for_position(self, pos):
         if self.isMaximized() or self.isFullScreen():
-            self.view.unsetCursor()
+            self.unsetCursor()
             return
-        m = self.RESIZE_MARGIN
-        on_left = pos.x() <= m
-        on_right = pos.x() >= self.view.width() - m
-        on_top = pos.y() <= m
-        on_bottom = pos.y() >= self.view.height() - m
-        if (on_left and on_top) or (on_right and on_bottom):
-            self.view.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif (on_right and on_top) or (on_left and on_bottom):
-            self.view.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        elif on_left or on_right:
-            self.view.setCursor(Qt.CursorShape.SizeHorCursor)
-        elif on_top or on_bottom:
-            self.view.setCursor(Qt.CursorShape.SizeVerCursor)
-        else:
-            self.view.unsetCursor()
+        edge = self._hit_test_edge(pos)
+        cursors = {
+            'top-left': Qt.CursorShape.SizeFDiagCursor,
+            'bottom-right': Qt.CursorShape.SizeFDiagCursor,
+            'top-right': Qt.CursorShape.SizeBDiagCursor,
+            'bottom-left': Qt.CursorShape.SizeBDiagCursor,
+            'left': Qt.CursorShape.SizeHorCursor,
+            'right': Qt.CursorShape.SizeHorCursor,
+            'top': Qt.CursorShape.SizeVerCursor,
+            'bottom': Qt.CursorShape.SizeVerCursor,
+        }
+        self.setCursor(cursors.get(edge, Qt.CursorShape.ArrowCursor))
 
     def leaveEvent(self, event):
-        # Make sure we don't leave a resize cursor stuck when the user
-        # moves the mouse off the window.
-        self.view.unsetCursor()
+        self.unsetCursor()
         super().leaveEvent(event)
 
     def changeEvent(self, event):
-        # Reset the cursor whenever the window's state changes (e.g. restore
-        # from maximized) so we don't show a stale SizeVer cursor.
         if event.type() == QEvent.Type.WindowStateChange:
-            self.view.unsetCursor()
+            self.unsetCursor()
         super().changeEvent(event)
 
-    def _setup_tray(self):
+        def _setup_tray(self):
+        """Create system tray icon with context menu."""
         self.tray = QSystemTrayIcon(self)
         self.tray.setToolTip("J.A.R.V.I.S. Core Matrix")
-        # Build a simple 64x64 icon programmatically since we may not have a resource file
-        from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont
+        # Build a simple 64x64 icon programmatically
         pix = QPixmap(64, 64)
         pix.fill(QColor("transparent"))
         p = QPainter(pix)
@@ -5568,7 +5670,7 @@ class JarvisMainWindow(QMainWindow):
                 self.raise_()
                 self.activateWindow()
 
-    def _setup_global_hotkey(self):
+        def _setup_global_hotkey(self):
         if HAS_PYNPUT:
             try:
                 hotkey_str = self.config.get("global_hotkey", "ctrl+alt+j")
