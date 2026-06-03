@@ -1240,12 +1240,28 @@ UI_HTML = """
     </style>
         <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script>
-        // CRITICAL: Always dismiss boot screen after 3 seconds, no matter what
+        // CRITICAL: Always dismiss boot screen after 8 seconds, no matter what
+        // This ensures the UI is never permanently stuck
         setTimeout(function() {
-            bridge.approvalRequested.connect((id, tool, args) => showApprovalModal(id, tool, args));
-        bridge.audioDevicesListed.connect((json) => populateAudioDevices(JSON.parse(json)));
-        bridge.configPushed.connect((json) => applyConfig(JSON.parse(json)));
-        setBootDone();
+            try {
+                setBootDone();
+                console.log("[BOOT] Auto-dismissed after timeout");
+            } catch(e) {
+                console.error("[BOOT] Auto-dismiss failed:", e);
+                // Force hide the overlay
+                var el = document.getElementById('boot-overlay');
+                if (el) {
+                    el.style.display = 'none';
+                    el.style.opacity = '0';
+                }
+            }
+        }, 8000);
+
+        // Also try at 3 seconds as a quick fallback
+        setTimeout(function() {
+            if (typeof bridge !== 'undefined' && bridge) {
+                setBootDone();
+            }
         }, 3000);
 
         let bridge = null;
@@ -2294,13 +2310,23 @@ class PyBridge(QObject):
 
     @pyqtSlot()
     def onBridgeReady(self):
-        self.window.ui_ready = True
-        self.logReceived.emit("JARVIS", "Neural matrix online. All systems nominal. Awaiting your command, Sir.")
-        self.telemetryUpdated.emit(0, 0, 0, "0.0 B/s", "0.0 B/s", "System Idle")
-        # Push config and audio devices to UI
-        self.window.push_config_to_ui()
-        self.window.list_audio_devices()
-        self.window.start_core()
+        try:
+            self.window.ui_ready = True
+            self.logReceived.emit("JARVIS", "Neural matrix online. All systems nominal. Awaiting your command, Sir.")
+            self.telemetryUpdated.emit(0, 0, 0, "0.0 B/s", "0.0 B/s", "System Idle")
+            # Push config and audio devices to UI
+            try:
+                self.window.push_config_to_ui()
+            except Exception as e:
+                logger.warning(f"Config push failed: {e}")
+            try:
+                self.window.list_audio_devices()
+            except Exception as e:
+                logger.warning(f"Audio device listing failed: {e}")
+            self.window.start_core()
+        except Exception as e:
+            logger.error(f"Bridge ready error: {e}")
+            self.logReceived.emit("SYSTEM", f"Bridge initialization warning: {e}")
 
     @pyqtSlot(str)
     def setVoiceModeEnabled(self, enabled_str):
@@ -2428,6 +2454,11 @@ class ResponseWatchdog:
             self.callback()
         except Exception as e:
             logger.error(f"[Watchdog] callback error: {e}")
+
+
+def _web_search(query: str, max_results: int = 5) -> str:
+    """Multi-engine web search wrapper."""
+    return _web_search_ddg(query, max_results)
 
 
 def _web_search_ddg(query: str, max_results: int = 5) -> str:
@@ -4022,7 +4053,7 @@ class JarvisCore:
     # ----- Internet -----
     def _tool_web_search(self, query: str, max_results: int = 5):
         """Multi-engine web search with fallback."""
-        return _web_search_ddg(query, max_results)
+        return _web_search(query, max_results)
 
     def _tool_fetch_url(self, url: str, max_chars: int = 8000):
         """Fetch a URL and return extracted text."""
