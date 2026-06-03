@@ -604,48 +604,50 @@ UI_HTML = """
             white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
         }
 
-        /* Center */
-        #center-panel { align-items: center; justify-content: center; position: relative; }
+        /* Center — Arc Reactor */
+        #center-panel {
+            align-items: center; justify-content: center; position: relative;
+            background: radial-gradient(ellipse at 50% 45%, rgba(0,212,255,0.04) 0%, var(--jarvis-panel) 60%);
+        }
 
-        /* Arc reactor:
-           - .reactor-wrap centers the SVG (200x200 viewBox) in the panel.
-           - .reactor-svg has a soft cyan drop-shadow glow.
-           - 4 rotating concentric rings + 4 static thin guide circles;
-             adjacent rings spin opposite directions for the orbital-
-             mechanics look:
-               * .ring-hex    (r=90)  — fine dashed,   rotates CCW (35s, slow)
-               * .ring-outer  (r=82)  — medium dashed, rotates CW  (25s)
-               * .ring-mid    (r=64)  — tight dashed,  rotates CCW (18s)
-               * .ring-inner  (r=46)  — long-dash,     rotates CW  (12s, fast)
-           - .core-glow is the pulsing radial-gradient central orb.
-           - Core fill + ring stroke colors swap with JARVIS state
-             (cyan/amber/teal/red) — driven by setStatus() in JS. */
+        /* Arc Reactor — Tony Stark's chest piece
+           3-layer SVG: outer mechanical ring, mid rotating segments, inner core.
+           Each layer has its own rotation speed and direction. The core pulses
+           with JARVIS state color. SVG filters add bloom/glow. */
         .reactor-wrap {
-            width: 300px; height: 300px; position: relative;
+            width: 320px; height: 320px; position: relative;
             display: flex; align-items: center; justify-content: center;
         }
         .reactor-svg {
             width: 100%; height: 100%;
-            filter: drop-shadow(0 0 25px rgba(0, 212, 255, 0.3));
+            filter: drop-shadow(0 0 30px rgba(0, 212, 255, 0.35));
         }
-        .ring-outer, .ring-mid, .ring-inner, .ring-hex {
-            transform-origin: 100px 100px;
-        }
-        .ring-hex   { animation: spin-ccw 35s linear infinite; }
-        .ring-outer { animation: spin-cw  25s linear infinite; }
-        .ring-mid   { animation: spin-ccw 18s linear infinite; }
-        .ring-inner { animation: spin-cw  12s linear infinite; }
-        .core-glow  {
-            transform-origin: 100px 100px;
+        /* Outer static ring — never rotates, gives the "housing" feel */
+        .ring-housing { }
+        /* 3 rotating groups: each contains segments that orbit the center */
+        .ring-outer  { animation: spin-cw  30s linear infinite; transform-origin: 150px 150px; }
+        .ring-mid    { animation: spin-ccw 18s linear infinite; transform-origin: 150px 150px; }
+        .ring-inner  { animation: spin-cw  10s linear infinite; transform-origin: 150px 150px; }
+        /* Core glow — pulsing radial bloom */
+        .core-glow   {
+            transform-origin: 150px 150px;
             animation: core-pulse 3s ease-in-out infinite;
         }
+        .core-bloom  {
+            transform-origin: 150px 150px;
+            animation: core-pulse 3s ease-in-out infinite 0.3s;
+        }
 
-        /* Counter-rotation keyframes + pulsing core. */
         @keyframes spin-cw  { from { transform: rotate(0deg); }   to { transform: rotate(360deg);  } }
         @keyframes spin-ccw { from { transform: rotate(0deg); }   to { transform: rotate(-360deg); } }
         @keyframes core-pulse {
-            0%, 100% { transform: scale(1);    opacity: 0.7; }
-            50%      { transform: scale(1.15); opacity: 1;   }
+            0%, 100% { opacity: 0.6; transform: scale(1);    }
+            50%      { opacity: 1;   transform: scale(1.08); }
+        }
+        /* Subtle ring shimmer — a rotating highlight on the outer housing */
+        .ring-shimmer {
+            transform-origin: 150px 150px;
+            animation: spin-cw 12s linear infinite;
         }
 
         #audio-viz {
@@ -805,6 +807,45 @@ UI_HTML = """
             letter-spacing: 1px; margin-left: 4px;
         }
         .badge-fallback { background: rgba(255, 183, 3, 0.15); color: #ffb703; border: 1px solid rgba(255, 183, 3, 0.3); }
+
+        /* UX: Send animation — input flashes when command is sent */
+        .cmd-sending {
+            animation: cmd-send-flash 0.4s ease;
+        }
+        @keyframes cmd-send-flash {
+            0%   { border-color: var(--jarvis-cyan); box-shadow: 0 0 20px rgba(0,212,255,0.4); }
+            100% { border-color: rgba(0,212,255,0.25); box-shadow: inset 0 2px 8px rgba(0,0,0,0.5); }
+        }
+        /* UX: EXECUTE button pressed state */
+        .exec-btn:active {
+            transform: scale(0.96);
+            box-shadow: 0 0 15px rgba(0,212,255,0.6);
+        }
+        /* UX: Smoother message entrance */
+        .msg {
+            animation: msg-slide-in 0.35s cubic-bezier(0.22, 1, 0.36, 1);
+        }
+        @keyframes msg-slide-in {
+            from { opacity: 0; transform: translateY(8px); }
+            to   { opacity: 1; transform: translateY(0); }
+        }
+        /* UX: Panel subtle hover lift */
+        .hud-panel {
+            transition: box-shadow 0.3s ease, border-color 0.3s ease;
+        }
+        .hud-panel:hover {
+            border-color: rgba(0, 212, 255, 0.2);
+            box-shadow: 0 0 20px rgba(0, 212, 255, 0.05);
+        }
+        /* UX: Input placeholder shimmer */
+        #cmd-input::placeholder {
+            color: var(--text-dim);
+            animation: placeholder-pulse 4s ease-in-out infinite;
+        }
+        @keyframes placeholder-pulse {
+            0%, 100% { opacity: 0.5; }
+            50%      { opacity: 0.8; }
+        }
     </style>
         <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
     <script>
@@ -1007,10 +1048,10 @@ function initBridge() {
                 center.className = 'hud-panel state-' + s.toLowerCase();
             }
             // Recolor the reactor: swap the core's fill + drop-shadow and
-            // tint all four rotating rings, plus adjust rotation speed so
-            // the orbital animation reflects current activity.
+            // tint all three rotating ring groups, plus adjust rotation speed
+            // so the orbital animation reflects current activity.
             const core = document.getElementById('reactor-core');
-            const rings = document.querySelectorAll('.reactor-svg circle[class^="ring-"]');
+            const ringGroups = document.querySelectorAll('.reactor-svg g[class^="ring-outer"], .reactor-svg g[class^="ring-mid"], .reactor-svg g[class^="ring-inner"]');
             const reactorPalette = {
                 THINKING:    { color: '#ffb703', speed: '3s'  },
                 LISTENING:   { color: '#00f5d4', speed: '8s'  },
@@ -1021,13 +1062,22 @@ function initBridge() {
             const cfg = reactorPalette[s] || { color: '#00d4ff', speed: '25s' };
             if (core) {
                 core.style.fill = cfg.color;
-                core.style.filter = 'drop-shadow(0 0 15px ' + cfg.color + ')';
+                core.style.filter = 'drop-shadow(0 0 20px ' + cfg.color + ')';
             }
             const hex = cfg.color.replace('#','');
             const rgb = [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16), parseInt(hex.slice(4,6),16)];
-            rings.forEach(r => {
-                r.style.stroke = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.3)`;
-                r.style.animationDuration = cfg.speed;
+            ringGroups.forEach(g => {
+                // Tint all circles and polygons inside the group
+                g.querySelectorAll('circle, polygon').forEach(el => {
+                    if (el.getAttribute('fill') && el.getAttribute('fill') !== 'none') {
+                        el.style.fill = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.5)`;
+                    }
+                    if (el.getAttribute('stroke') && el.getAttribute('stroke') !== 'none') {
+                        el.style.stroke = `rgba(${rgb[0]},${rgb[1]},${rgb[2]},0.4)`;
+                    }
+                });
+                // Adjust rotation speed
+                g.style.animationDuration = cfg.speed;
             });
             // Show the 3-dot typing indicator while the model is thinking.
             // Auto-hides when JARVIS starts speaking or returns to ready.
@@ -1110,6 +1160,9 @@ function initBridge() {
             if (cmdHistory.length > 50) cmdHistory.shift();
             cmdIndex = cmdHistory.length;
             bridge.submitCommand(text);
+            // UX: flash the input field to confirm send
+            input.classList.add('cmd-sending');
+            setTimeout(() => input.classList.remove('cmd-sending'), 400);
             input.value = '';
         }
 
@@ -1144,6 +1197,24 @@ function initBridge() {
 </head>
 <body>
     <div id="boot-overlay">
+        <svg width="80" height="80" viewBox="0 0 300 300" style="margin-bottom:20px; filter:drop-shadow(0 0 20px rgba(0,212,255,0.4));">
+            <defs>
+                <radialGradient id="bootCore" cx="50%" cy="50%" r="50%">
+                    <stop offset="0%" stop-color="#fff" />
+                    <stop offset="40%" stop-color="#00d4ff" />
+                    <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
+                </radialGradient>
+            </defs>
+            <circle cx="150" cy="150" r="120" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="3" />
+            <circle cx="150" cy="150" r="100" fill="none" stroke="rgba(0,212,255,0.25)" stroke-width="3"
+                stroke-dasharray="80 25 80 25 80 25" stroke-linecap="round"
+                style="animation: spin-cw 4s linear infinite; transform-origin: 150px 150px;" />
+            <circle cx="150" cy="150" r="80" fill="none" stroke="rgba(0,212,255,0.2)" stroke-width="2"
+                stroke-dasharray="30 12 30 12 30 12 30 12" stroke-linecap="round"
+                style="animation: spin-ccw 3s linear infinite; transform-origin: 150px 150px;" />
+            <circle cx="150" cy="150" r="40" fill="url(#bootCore)" style="animation: core-pulse 2s ease-in-out infinite; transform-origin: 150px 150px;" />
+            <circle cx="150" cy="150" r="18" fill="#fff" opacity="0.9" />
+        </svg>
         <div class="boot-logo">J.A.R.V.I.S.</div>
         <div class="boot-sub">INITIALIZING NEURAL MATRIX // MARK XLV</div>
         <div class="boot-bar"><div class="boot-bar-inner"></div></div>
@@ -1182,34 +1253,123 @@ function initBridge() {
         </div>
         <div class="hud-panel" id="center-panel">
             <div class="reactor-wrap">
-                <svg class="reactor-svg" viewBox="0 0 200 200">
+                <svg class="reactor-svg" viewBox="0 0 300 300">
                     <defs>
+                        <!-- Core radial gradient — white center fading to cyan -->
                         <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
-                            <stop offset="0%" stop-color="#ffffff" />
-                            <stop offset="50%" stop-color="#00d4ff" />
+                            <stop offset="0%"  stop-color="#ffffff" />
+                            <stop offset="30%" stop-color="#e0f7ff" />
+                            <stop offset="60%" stop-color="#00d4ff" />
                             <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
                         </radialGradient>
+                        <!-- Outer bloom — large soft glow behind the reactor -->
+                        <radialGradient id="bloomGrad" cx="50%" cy="50%" r="50%">
+                            <stop offset="0%"  stop-color="#00d4ff" stop-opacity="0.12" />
+                            <stop offset="60%" stop-color="#00d4ff" stop-opacity="0.04" />
+                            <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
+                        </radialGradient>
+                        <!-- Ring metallic gradient -->
+                        <linearGradient id="ringMetal" x1="0%" y1="0%" x2="100%" y2="100%">
+                            <stop offset="0%"  stop-color="rgba(0,212,255,0.35)" />
+                            <stop offset="50%" stop-color="rgba(0,212,255,0.15)" />
+                            <stop offset="100%" stop-color="rgba(0,212,255,0.35)" />
+                        </linearGradient>
+                        <!-- SVG filter for soft bloom -->
+                        <filter id="bloom" x="-50%" y="-50%" width="200%" height="200%">
+                            <feGaussianBlur stdDeviation="3" result="blur" />
+                            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                        </filter>
+                        <filter id="coreBloom" x="-80%" y="-80%" width="260%" height="260%">
+                            <feGaussianBlur stdDeviation="6" result="blur" />
+                            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+                        </filter>
                     </defs>
 
-                    <!-- Outer rings -->
-                    <circle cx="100" cy="100" r="95" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="1" />
-                    <circle cx="100" cy="100" r="90" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1.5" stroke-dasharray="4 8" class="ring-hex" />
-                    <circle cx="100" cy="100" r="82" fill="none" stroke="rgba(0,212,255,0.2)" stroke-width="2" stroke-dasharray="10 14" class="ring-outer" />
-                    <circle cx="100" cy="100" r="72" fill="none" stroke="rgba(0,212,255,0.08)" stroke-width="1" />
-                    <circle cx="100" cy="100" r="64" fill="none" stroke="rgba(0,212,255,0.25)" stroke-width="2.5" stroke-dasharray="6 6" class="ring-mid" />
-                    <circle cx="100" cy="100" r="54" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1" />
-                    <circle cx="100" cy="100" r="46" fill="none" stroke="rgba(0,212,255,0.3)" stroke-width="2" stroke-dasharray="12 4" class="ring-inner" />
-                    <circle cx="100" cy="100" r="36" fill="none" stroke="rgba(0,212,255,0.15)" stroke-width="1" />
+                    <!-- Background bloom — large ambient glow -->
+                    <circle cx="150" cy="150" r="140" fill="url(#bloomGrad)" />
 
-                    <!-- Glowing core -->
-                    <circle cx="100" cy="100" r="28" fill="url(#coreGrad)" class="core-glow" id="reactor-core" />
-                    <circle cx="100" cy="100" r="14" fill="#fff" opacity="0.9" />
+                    <!-- LAYER 1: Outer housing ring (static) -->
+                    <g class="ring-housing">
+                        <!-- Main outer ring — thick metallic band -->
+                        <circle cx="150" cy="150" r="130" fill="none" stroke="rgba(0,212,255,0.12)" stroke-width="3" />
+                        <circle cx="150" cy="150" r="126" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="1" />
+                        <!-- Tick marks around the outer ring — 36 marks at 10-degree intervals -->
+                        <g opacity="0.3">
+                            <line x1="150" y1="18"  x2="150" y2="28"  stroke="#00d4ff" stroke-width="1.5" />
+                            <line x1="150" y1="272" x2="150" y2="282" stroke="#00d4ff" stroke-width="1.5" />
+                            <line x1="18"  y1="150" x2="28"  y2="150" stroke="#00d4ff" stroke-width="1.5" />
+                            <line x1="272" y1="150" x2="282" y2="150" stroke="#00d4ff" stroke-width="1.5" />
+                            <!-- 45-degree marks -->
+                            <line x1="54"  y1="54"  x2="61"  y2="61"  stroke="#00d4ff" stroke-width="1" />
+                            <line x1="239" y1="54"  x2="246" y2="61"  stroke="#00d4ff" stroke-width="1" />
+                            <line x1="54"  y1="239" x2="61"  y2="246" stroke="#00d4ff" stroke-width="1" />
+                            <line x1="239" y1="239" x2="246" y2="246" stroke="#00d4ff" stroke-width="1" />
+                        </g>
+                        <!-- Thin guide circles -->
+                        <circle cx="150" cy="150" r="118" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="0.5" />
+                        <circle cx="150" cy="150" r="100" fill="none" stroke="rgba(0,212,255,0.04)" stroke-width="0.5" />
+                    </g>
 
-                    <!-- Crosshairs -->
-                    <line x1="100" y1="5" x2="100" y2="15" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
-                    <line x1="100" y1="185" x2="100" y2="195" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
-                    <line x1="5" y1="100" x2="15" y2="100" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
-                    <line x1="185" y1="100" x2="195" y2="100" stroke="rgba(0,212,255,0.5)" stroke-width="1.5" />
+                    <!-- LAYER 2: Outer rotating ring — 3 segmented arcs -->
+                    <g class="ring-outer" filter="url(#bloom)">
+                        <!-- 3 arc segments (120 degrees each, with gaps) -->
+                        <circle cx="150" cy="150" r="112" fill="none" stroke="url(#ringMetal)" stroke-width="4"
+                            stroke-dasharray="100 30 100 30 100 30" stroke-linecap="round" />
+                        <!-- Dot accents at segment midpoints -->
+                        <circle cx="150" cy="38"  r="3" fill="#00d4ff" opacity="0.6" />
+                        <circle cx="247" cy="206" r="3" fill="#00d4ff" opacity="0.6" />
+                        <circle cx="53"  cy="206" r="3" fill="#00d4ff" opacity="0.6" />
+                    </g>
+
+                    <!-- LAYER 3: Mid rotating ring — finer segments, counter-rotate -->
+                    <g class="ring-mid" filter="url(#bloom)">
+                        <circle cx="150" cy="150" r="92" fill="none" stroke="rgba(0,212,255,0.3)" stroke-width="3"
+                            stroke-dasharray="40 15 40 15 40 15 40 15 40 15 40 15" stroke-linecap="round" />
+                        <!-- Small triangular markers at 6 positions -->
+                        <polygon points="150,55 146,63 154,63" fill="#00d4ff" opacity="0.5" />
+                        <polygon points="233,100 225,96 225,104" fill="#00d4ff" opacity="0.5" />
+                        <polygon points="233,200 225,196 225,204" fill="#00d4ff" opacity="0.5" />
+                        <polygon points="150,245 146,237 154,237" fill="#00d4ff" opacity="0.5" />
+                        <polygon points="67,200 75,196 75,204" fill="#00d4ff" opacity="0.5" />
+                        <polygon points="67,100 75,96 75,104" fill="#00d4ff" opacity="0.5" />
+                    </g>
+
+                    <!-- LAYER 4: Inner rotating ring — tight dashed, fast -->
+                    <g class="ring-inner" filter="url(#bloom)">
+                        <circle cx="150" cy="150" r="72" fill="none" stroke="rgba(0,212,255,0.35)" stroke-width="2.5"
+                            stroke-dasharray="18 8 18 8 18 8 18 8" stroke-linecap="round" />
+                    </g>
+
+                    <!-- Shimmer ring — faint rotating highlight -->
+                    <g class="ring-shimmer" opacity="0.15">
+                        <circle cx="150" cy="150" r="112" fill="none" stroke="#fff" stroke-width="1"
+                            stroke-dasharray="60 640" stroke-linecap="round" />
+                    </g>
+
+                    <!-- Static inner guide rings -->
+                    <circle cx="150" cy="150" r="58" fill="none" stroke="rgba(0,212,255,0.08)" stroke-width="1" />
+                    <circle cx="150" cy="150" r="48" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1.5" />
+
+                    <!-- Radial spokes — thin lines from core outward (6 spokes) -->
+                    <g opacity="0.15" stroke="#00d4ff" stroke-width="0.8">
+                        <line x1="150" y1="92"  x2="150" y2="55" />
+                        <line x1="200" y1="121" x2="233" y2="100" />
+                        <line x1="200" y1="179" x2="233" y2="200" />
+                        <line x1="150" y1="208" x2="150" y2="245" />
+                        <line x1="100" y1="179" x2="67"  y2="200" />
+                        <line x1="100" y1="121" x2="67"  y2="100" />
+                    </g>
+
+                    <!-- LAYER 5: Core — multi-layer pulsing glow -->
+                    <!-- Outer bloom -->
+                    <circle cx="150" cy="150" r="44" fill="url(#coreGrad)" class="core-bloom" opacity="0.3" />
+                    <!-- Main core glow -->
+                    <circle cx="150" cy="150" r="34" fill="url(#coreGrad)" class="core-glow" id="reactor-core" filter="url(#coreBloom)" />
+                    <!-- Inner bright ring -->
+                    <circle cx="150" cy="150" r="22" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1.5" />
+                    <!-- White-hot center -->
+                    <circle cx="150" cy="150" r="14" fill="#fff" opacity="0.95" />
+                    <circle cx="150" cy="150" r="8"  fill="#fff" opacity="1" />
                 </svg>
             </div>
             <canvas id="audio-viz" width="260" height="60"></canvas>
