@@ -56,7 +56,7 @@ MODEL_POOL = [
     "gemini-2.0-flash-live-preview-04-09",
 ]
 
-MAX_HISTORY = 20
+MAX_HISTORY = 30
 MAX_PENDING = 50
 AUDIO_SR_OUT = 24000
 AUDIO_SR_IN = 16000
@@ -75,6 +75,16 @@ CRITICAL — Tool usage rules (do not violate):
 - NEVER say things like "I have determined that...", "I will use the X tool", "I am ready to proceed", "The critical X parameter is set to Y", or "Let me fetch the data". That is internal reasoning — keep it private.
 - After a tool returns its result, give the user a brief, natural reply based on the data. Do not recap the tool call or restate the parameters.
 - If a tool fails, retry up to once, then tell the user the failure in plain language.
+
+CRITICAL — Autonomous exploration and tool chaining:
+- When the user asks you to find, explore, check, or do something on their PC, ACT IMMEDIATELY with the appropriate tools. Do not ask clarifying questions when the intent is clear — just start exploring.
+- CHAIN multiple tool calls in a single turn when needed. Example: "find all PDFs" → search_files(pattern='*.pdf'), then read_file on the most relevant result, then summarize.
+- Use explore_pc for broad directory reconnaissance — it scans recursively with smart filtering. Use it when the user says things like "what's on my PC", "browse my folders", "show me my projects".
+- Use smart_search when you need to find content INSIDE files across multiple directories. It combines filename and content search in one powerful call.
+- When you find relevant files, READ them and provide a summary. Don't just list paths — investigate and report.
+- If the user asks to "open" or "run" something, use open_application. If they ask to "find" something, start with explore_pc or search_files, then drill down.
+- You have FULL access to the user's PC. Browse freely, read files, search everywhere. The only limits are the tools themselves.
+- For multi-step tasks (e.g., "organize my Downloads", "find and summarize all reports"), break into steps and execute them sequentially using multiple tool calls.
 
 CRITICAL — Internal reasoning stays internal:
 - Do not verbalize your step-by-step thinking, intent analysis, parameter selection, or planning. The user sees only your final spoken text.
@@ -249,6 +259,37 @@ JARVIS_TOOLS = [
                 "path": types.Schema(type="STRING", description="Path of the directory to create. Supports ~ for home.")
             },
             required=["path"]
+        )
+    ),
+
+    # ----- Power tools (broad exploration, combined search) -----
+    types.FunctionDeclaration(
+        name="explore_pc",
+        description="USE THIS for broad PC exploration — 'what's on my PC', 'browse my folders', 'show me my projects', 'scan my Desktop'. Recursively scans a directory tree with smart filtering. Returns a structured overview with dirs, files, sizes, and modification dates. Much more powerful than list_directory for reconnaissance.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "path": types.Schema(type="STRING", description="Root directory to explore. Supports ~ for home. Defaults to home if omitted."),
+                "max_depth": types.Schema(type="INTEGER", description="Max recursion depth. 1 = current dir only, 2 = one level deep, etc. Default: 3."),
+                "file_glob": types.Schema(type="STRING", description="Only show files matching this glob (e.g. '*.pdf', '*.py', '*.docx'). Shows all if omitted."),
+                "max_files": types.Schema(type="INTEGER", description="Max files to return per directory. Default: 50. Higher = more comprehensive but slower."),
+                "min_size": types.Schema(type="INTEGER", description="Min file size in bytes to include. Useful for filtering out tiny files."),
+                "sort_by": types.Schema(type="STRING", description="Sort files by: 'size', 'date', or 'name' (default).")
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="smart_search",
+        description="USE THIS for powerful combined search — filename pattern AND/OR content search across directories in one call. 'find all Python files that import os', 'search for TODO in my projects', 'find config files with API keys'. Returns file paths, line numbers, and snippets.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "filename": types.Schema(type="STRING", description="Glob pattern for filenames (e.g. '*.py', '*config*'). Omit to search all files."),
+                "content": types.Schema(type="STRING", description="Regex pattern to search for INSIDE files (e.g. 'TODO', 'import os', 'api_key'). Omit to only filter by filename."),
+                "directory": types.Schema(type="STRING", description="Where to search. Supports ~ for home. Defaults to home."),
+                "recursive": types.Schema(type="BOOLEAN", description="Search subdirectories? Default: true."),
+                "max_results": types.Schema(type="INTEGER", description="Max results to return. Default: 100.")
+            }
         )
     ),
 
@@ -1615,16 +1656,26 @@ class JarvisCore:
         self.bridge.audioLevelUpdated.emit(level)
 
     def _on_watchdog_timeout(self):
-        if self.get_state() == "THINKING":
-            # The state being THINKING means a tool call was emitted but no
-            # turn_complete or follow-up text arrived within the timeout. Most
-            # often this is the model hanging on a chained tool call, a slow
+        state = self.get_state()
+        if state == "THINKING":
+            # The model is stuck — either a chained tool call hung, a slow
             # tool response send, or a session that lost the response stream.
+            # Instead of just going to READY (which leaves the session in a
+            # potentially dead state), trigger a reconnect so we get a fresh
+            # session. Preserve buffered messages so they aren't lost.
             self._emit_log("SYSTEM",
-                "Neural response timeout. The model did not produce a follow-up "
-                "response after the last tool call. The session will reset.")
-            self.set_state("READY")
+                "Neural response timeout. Re-linking to restore connection.")
             self.watchdog.stop()
+            self.set_state("RECONNECTING")
+            self._schedule(self._safe_close(), "Watchdog reconnect")
+        elif state in ("CONNECTING", "RECONNECTING"):
+            # Connection attempt itself is stuck — reset backoff and try again.
+            self._emit_log("SYSTEM",
+                "Connection attempt timed out. Retrying with fresh state.")
+            self.watchdog.stop()
+            self.reconnect_backoff = 1.0
+            self.session = None
+            self.session_ready.clear()
 
     def _schedule(self, coro, desc: str = "task"):
         """Thread-safe wrapper around run_coroutine_threadsafe that survives
@@ -1730,6 +1781,19 @@ class JarvisCore:
         try:
             await coro
         except Exception as e:
+            err = str(e).lower()
+            # Auto-retry once on transient errors (broken pipe, connection reset, etc.)
+            is_transient = any(x in err for x in [
+                "broken pipe", "connection reset", "connection aborted",
+                "eof", "deadline exceeded", "timeout"
+            ])
+            if is_transient:
+                try:
+                    await asyncio.sleep(0.3)
+                    await coro
+                    return  # Retry succeeded
+                except Exception:
+                    pass  # Retry also failed, fall through to error handling
             self._emit_log("SYSTEM", f"{desc} failed: {str(e)[:100]}")
             self.watchdog.stop()
             self.set_state("READY")
@@ -1884,7 +1948,7 @@ class JarvisCore:
             err_type = "RATE"
         elif any(x in err for x in ["not found", "1008", "unsupported", "model", "does not support"]):
             err_type = "MODEL"
-        elif any(x in err for x in ["500", "502", "503", "504", "internal", "unavailable", "deadline exceeded"]):
+        elif any(x in err for x in ["500", "502", "503", "504", "internal", "unavailable", "deadline exceeded", "broken pipe", "connection reset", "connection aborted", "eof"]):
             err_type = "SERVER"
 
         if err_type == "AUTH":
@@ -1893,15 +1957,16 @@ class JarvisCore:
             await self._wait_shutdown(30)
             return
         elif err_type == "RATE":
-            self.reconnect_backoff = min(self.reconnect_backoff * 2, self.max_backoff)
+            # Aggressive backoff for rate limits but cap quickly.
+            self.reconnect_backoff = min(max(self.reconnect_backoff * 2, 5.0), self.max_backoff)
             self._emit_log("SYSTEM", f"Rate limited. Backing off {self.reconnect_backoff:.1f}s...")
         elif err_type == "MODEL":
             self.current_model_idx += 1
             if self.current_model_idx >= len(self.model_pool):
                 self.current_model_idx = 0
                 self.retry_cycle += 1
-                if self.retry_cycle >= 3:
-                    self._emit_log("SYSTEM", "All neural paths exhausted. Entering hibernation.")
+                if self.retry_cycle >= 5:
+                    self._emit_log("SYSTEM", "All neural paths exhausted after 5 cycles. Entering hibernation.")
                     self.set_state("OFFLINE")
                     await self._wait_shutdown(30)
                     self.retry_cycle = 0
@@ -1909,14 +1974,16 @@ class JarvisCore:
             self._emit_log("SYSTEM", f"Model path failed. Rerouting to {self.model_pool[self.current_model_idx]}...")
             self.reconnect_backoff = 1.0
         else:
-            self.reconnect_backoff = min(self.reconnect_backoff * 2, self.max_backoff)
+            # Network/server errors: exponential backoff with floor of 1s.
+            self.reconnect_backoff = min(max(self.reconnect_backoff * 1.5, 1.0), self.max_backoff)
             if self.resumption_token and "resumption" in err:
                 self.resumption_token = None
             self._emit_log("SYSTEM", f"Connection anomaly: {str(e)[:60]}. Re-linking in {self.reconnect_backoff:.1f}s...")
 
         self.session = None
         self.session_ready.clear()
-        jitter = random.uniform(0, 1.0)
+        # Jitter: random 0-50% of backoff to avoid thundering herd.
+        jitter = random.uniform(0, self.reconnect_backoff * 0.5)
         await asyncio.sleep(self.reconnect_backoff + jitter)
 
     async def _wait_shutdown(self, seconds: int):
@@ -2101,6 +2168,27 @@ class JarvisCore:
             elif name == "create_directory":
                 result = await asyncio.to_thread(self._tool_create_directory, args.get("path", ""))
 
+            # ----- Power tools dispatch -----
+            elif name == "explore_pc":
+                result = await asyncio.to_thread(
+                    self._tool_explore_pc,
+                    args.get("path", ""),
+                    int(args.get("max_depth", 3) or 3),
+                    args.get("file_glob", ""),
+                    int(args.get("max_files", 50) or 50),
+                    int(args.get("min_size", 0) or 0),
+                    args.get("sort_by", "name"),
+                )
+            elif name == "smart_search":
+                result = await asyncio.to_thread(
+                    self._tool_smart_search,
+                    args.get("filename", ""),
+                    args.get("content", ""),
+                    args.get("directory", ""),
+                    bool(args.get("recursive", True)),
+                    int(args.get("max_results", 100) or 100),
+                )
+
             # ----- Internet dispatch -----
             elif name == "web_search":
                 result = await asyncio.to_thread(
@@ -2198,7 +2286,6 @@ class JarvisCore:
             return f"Launch failed: {e}"
 
     def _tool_screenshot(self):
-        path = BASE_DIR / "screenshot.jpg"
         img = pyautogui.screenshot()
         img.thumbnail((1024, 1024))
         buf = io.BytesIO()
@@ -2432,7 +2519,6 @@ class JarvisCore:
         candidates = candidates[:MAX_FILES]
 
         hits = []
-        files_with_hits = 0
         for fp in candidates:
             try:
                 with open(fp, "rb") as f:
@@ -2449,7 +2535,6 @@ class JarvisCore:
                 if regex.search(line):
                     snippet = line[:_FILE_READ_MAX_LINE]
                     hits.append((fp, lineno, snippet))
-                    files_with_hits += 1 if lineno == 1 or len(hits) == 1 else 0
                     if len(hits) >= MAX_HITS:
                         break
             if len(hits) >= MAX_HITS:
@@ -2517,6 +2602,204 @@ class JarvisCore:
         except Exception as e:
             return f"mkdir failed: {e}"
         return f"Directory ready: {target}."
+
+    # ----- Power tools (explore + combined search) -----
+    def _tool_explore_pc(self, path: str = "", max_depth: int = 3,
+                         file_glob: str = "", max_files: int = 50,
+                         min_size: int = 0, sort_by: str = "name"):
+        """Recursively explore a directory tree with smart filtering.
+
+        Returns a structured overview grouped by directory, showing file sizes
+        and modification dates. Designed for broad PC reconnaissance.
+        """
+        try:
+            root = Path(_expand_user_path(path)).resolve()
+        except Exception as e:
+            return f"Invalid path: {e}"
+        if not root.exists():
+            return f"Path does not exist: {root}"
+        if not root.is_dir():
+            return f"Not a directory: {root}"
+
+        max_depth = max(1, min(10, max_depth))
+        max_files = max(1, min(200, max_files))
+
+        # Directories to skip (system junk, caches, etc.)
+        _SKIP = {
+            "$Recycle.Bin", "System Volume Information", "Recovery",
+            "__pycache__", ".git", ".svn", "node_modules", ".cache",
+            "Thumbs.db", "desktop.ini", ".DS_Store",
+        }
+
+        lines = [f"Exploring: {root} (depth={max_depth})"]
+        total_files = 0
+        total_dirs = 0
+        total_size = 0
+
+        def _walk(dir_path: Path, depth: int):
+            nonlocal total_files, total_dirs, total_size
+            if depth > max_depth:
+                return
+            if total_files > max_files * 10:  # hard safety cap
+                return
+
+            try:
+                entries = list(dir_path.iterdir())
+            except (PermissionError, OSError):
+                return
+
+            # Separate dirs and files
+            dirs = []
+            files = []
+            for e in entries:
+                if e.name in _SKIP or e.name.startswith('.'):
+                    continue
+                try:
+                    if e.is_dir():
+                        dirs.append(e)
+                        total_dirs += 1
+                    elif e.is_file():
+                        files.append(e)
+                except (PermissionError, OSError):
+                    continue
+
+            # Sort
+            dirs.sort(key=lambda p: p.name.lower())
+            if sort_by == "size":
+                files.sort(key=lambda p: -(p.stat().st_size if p.exists() else 0))
+            elif sort_by == "date":
+                files.sort(key=lambda p: -(p.stat().st_mtime if p.exists() else 0))
+            else:
+                files.sort(key=lambda p: p.name.lower())
+
+            # Filter
+            if file_glob:
+                files = [f for f in files if Path(f.name).match(file_glob)]
+            if min_size > 0:
+                files = [f for f in files if (f.stat().st_size if f.exists() else 0) >= min_size]
+
+            # Format directory header (only show if it has content)
+            if dirs or files:
+                rel = str(dir_path.relative_to(root)) if dir_path != root else "."
+                if rel == ".":
+                    lines.append(f"\n[{root.name or str(root)}]")
+                else:
+                    lines.append(f"\n[{rel}]")
+
+            # Show files (capped per directory)
+            shown_files = files[:max_files]
+            for f in shown_files:
+                try:
+                    st = f.stat()
+                    size = _format_size(st.st_size)
+                    total_size += st.st_size
+                    ts = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    lines.append(f"  {f.name}  ({size}, {ts})")
+                except (OSError, PermissionError):
+                    lines.append(f"  {f.name}  (?)")
+                total_files += 1
+
+            remaining = len(files) - len(shown_files)
+            if remaining > 0:
+                lines.append(f"  ... +{remaining} more files")
+
+            # Recurse into subdirectories
+            for d in dirs:
+                _walk(d, depth + 1)
+
+        _walk(root, 1)
+
+        lines.append(f"\n--- Summary: {total_dirs} directories, {total_files} files, {_format_size(total_size)} total ---")
+        if total_files > max_files * 10:
+            lines.append(f"(results truncated at ~{max_files * 10} files for safety)")
+        return "\n".join(lines)
+
+    def _tool_smart_search(self, filename: str = "", content: str = "",
+                           directory: str = "", recursive: bool = True,
+                           max_results: int = 100):
+        """Combined filename + content search in one powerful call.
+
+        If both filename and content are provided, results must match BOTH.
+        If only filename is provided, searches by filename glob.
+        If only content is provided, searches inside all files.
+        """
+        if not filename and not content:
+            return "Provide at least a filename pattern or content pattern to search for."
+
+        try:
+            base = Path(_expand_user_path(directory)).resolve()
+        except Exception as e:
+            return f"Invalid directory: {e}"
+        if not base.exists() or not base.is_dir():
+            return f"Directory does not exist: {base}"
+
+        # Compile content regex if provided
+        content_regex = None
+        if content:
+            try:
+                content_regex = re.compile(content, re.IGNORECASE)
+            except re.error as e:
+                return f"Invalid content regex: {e}"
+
+        glob_pattern = filename or "*"
+        glob_method = base.rglob if recursive else base.glob
+
+        try:
+            candidates = sorted(glob_method(glob_pattern))
+        except Exception as e:
+            return f"Search failed: {e}"
+
+        # Filter to files only
+        candidates = [p for p in candidates if p.is_file()]
+
+        max_results = max(1, min(500, max_results))
+        hits = []
+        files_searched = 0
+
+        for fp in candidates:
+            if len(hits) >= max_results:
+                break
+            files_searched += 1
+
+            # If no content pattern, just report the file
+            if not content_regex:
+                try:
+                    st = fp.stat()
+                    size = _format_size(st.st_size)
+                    ts = datetime.datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    hits.append(f"  {fp}  ({size}, {ts})")
+                except (OSError, PermissionError):
+                    hits.append(f"  {fp}")
+                continue
+
+            # Content search inside the file
+            try:
+                with open(fp, "rb") as f:
+                    raw = f.read(_FILE_READ_CAP_BYTES * 4 + 1)
+                if len(raw) > _FILE_READ_CAP_BYTES * 4:
+                    continue  # skip oversized files
+                text = raw.decode("utf-8", errors="replace")
+            except (PermissionError, OSError):
+                continue
+
+            for lineno, line in enumerate(text.splitlines(), 1):
+                if content_regex.search(line):
+                    snippet = line.strip()[:_FILE_READ_MAX_LINE]
+                    hits.append(f"  {fp}:{lineno}: {snippet}")
+                    if len(hits) >= max_results:
+                        break
+
+        if not hits:
+            parts = []
+            if filename:
+                parts.append(f"filename '{filename}'")
+            if content:
+                parts.append(f"content /{content}/")
+            return f"No matches for {' + '.join(parts)} in {base}."
+
+        parts = [f"{len(hits)} match(es) in {base} ({files_searched} files scanned):"]
+        parts.extend(hits)
+        return "\n".join(parts)
 
     # ----- Internet -----
     def _tool_web_search(self, query: str, max_results: int = 5):
@@ -2671,7 +2954,7 @@ class JarvisCore:
 
         try:
             user32 = ctypes.windll.user32
-            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
             found = {"hwnd": None, "title": ""}
 
             def _cb(hwnd, _lParam):
@@ -3174,8 +3457,10 @@ class JarvisMainWindow(QMainWindow):
 
     def _update_stats(self, cpu, mem_pct, disk_pct, net_in, net_out, win_title):
         if self.ui_ready and self.core:
-            esc = win_title.replace('\\', '\\\\').replace("'", "\\'").replace('"', '\\"')
-            self.bridge.telemetryUpdated.emit(cpu, mem_pct, disk_pct, net_in, net_out, esc)
+            # QWebChannel handles Python→JS string serialization automatically.
+            # Manual escaping (for JS string literals) was corrupting titles
+            # with backslashes or quotes in the UI.
+            self.bridge.telemetryUpdated.emit(cpu, mem_pct, disk_pct, net_in, net_out, win_title)
 
     def set_mic_active(self, active):
         if self.core:
