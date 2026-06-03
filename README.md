@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/28552257/README.md)
 # J.A.R.V.I.S. — Just A Rather Very Intelligent System
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
@@ -15,8 +14,21 @@ A local, system-level AI assistant built on **PyQt6** and **Google's Gemini Live
 
 ---
 
+## Why J.A.R.V.I.S.?
+
+Most AI assistants are chatbots in a browser. **J.A.R.V.I.S. is different:**
+
+- **System-level control** — Not just answers, but *actions*. Edit files, run shell commands, manage processes, control windows.
+- **Sci-fi HUD interface** — Built like Tony Stark's helmet display, not a chat window. Real-time telemetry, animated arc reactor, toast notifications.
+- **Single-file deployment** — One `jarvis.py`. No Docker, no microservices, no complexity.
+- **Privacy-first** — Runs locally. Your API key, your machine, your data.
+- **Voice-native** — Speak to it, it speaks back. Full duplex audio streaming.
+
+---
+
 ## Table of Contents
 
+- [Demo](#demo)
 - [Features](#features)
 - [Screenshots](#screenshots)
 - [Quick Start](#quick-start)
@@ -27,7 +39,14 @@ A local, system-level AI assistant built on **PyQt6** and **Google's Gemini Live
 - [Architecture](#architecture)
 - [Keyboard Shortcuts](#keyboard-shortcuts)
 - [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
 - [License](#license)
+
+---
+
+## Demo
+
+> *Add a 5-10 second GIF here showing the arc reactor pulsing + typing a command. This is the #1 driver of GitHub stars.*
 
 ---
 
@@ -59,7 +78,7 @@ A local, system-level AI assistant built on **PyQt6** and **Google's Gemini Live
 
 ### Audio System
 - **Device Selection** — Dropdown pickers for input and output audio devices
-- **Volume Control** — 0×–2× gain with numpy-based scaling
+- **Volume Control** — 0x–2x gain with numpy-based scaling
 - **Real-Time Visualizer** — 32-bar animated audio level meter on the arc reactor
 - **Voice Activity Detection** — Live input level monitoring
 
@@ -79,13 +98,10 @@ A local, system-level AI assistant built on **PyQt6** and **Google's Gemini Live
 ---
 
 ## Screenshots
-<img width="1365" height="705" alt="image" src="https://github.com/user-attachments/assets/ac194e77-cbf6-4f43-bb93-90f326ddea17" />
-<ing width="1366" height="713" alt="image" src="https://github.com/user-attachments/assets/b5162cd7-a645-4148-aca8-653a46ee3dac" />
-<img width="331" height="493" alt="image" src="https://github.com/user-attachments/assets/991861e2-aeae-4539-a0bb-554a8a96ac2f" />
-<img width="580" height="490" alt="image" src="https://github.com/user-attachments/assets/683f357a-0b0f-4b9b-992e-49ad760d0ef3" />
-<img width="468" height="489" alt="image" src="https://github.com/user-attachments/assets/d1d174a4-81c7-421a-8536-79a269f31a60" />
-<img width="1363" height="132" alt="image" src="https://github.com/user-attachments/assets/2fdaec8f-78d5-47dc-b8ef-3b1b4d56d56d" />
 
+| Full HUD | Telemetry | Arc Reactor | Chat Log | Controls |
+|----------|-----------|-------------|----------|----------|
+| ![Full HUD](screenshots/hud_full.png) | ![Telemetry](screenshots/telemetry.png) | ![Reactor](screenshots/reactor.png) | ![Chat](screenshots/chat.png) | ![Controls](screenshots/controls.png) |
 
 ---
 
@@ -106,11 +122,7 @@ A local, system-level AI assistant built on **PyQt6** and **Google's Gemini Live
 ### 3. Install Dependencies
 
 ```bash
-pip install pyqt6 pyqt6-webengine google-genai psutil pyautogui pyperclip sounddevice
-
-# Optional (enhanced features)
-pip install numpy      # Audio volume scaling
-pip install pynput     # Global hotkey support
+pip install -r requirements.txt
 ```
 
 ### 4. Run
@@ -142,26 +154,19 @@ On first launch, `jarvis_config.json` is auto-created with sensible defaults. Th
 ### Windows
 
 ```powershell
-# Using pip
-pip install pyqt6 pyqt6-webengine google-genai psutil pyautogui pyperclip sounddevice numpy pynput
-
-# Or requirements.txt
 pip install -r requirements.txt
 ```
 
 ### Linux
 
 ```bash
-# Debian/Ubuntu — Qt6 dependencies
-sudo apt-get install libqt6webenginecore6 libqt6webenginewidgets6
-
-# Audio backend
-sudo apt-get install libportaudio2
+# Debian/Ubuntu — Qt6 and audio dependencies
+sudo apt-get install libqt6webenginecore6 libqt6webenginewidgets6 libportaudio2
 
 # Window control (for focus_window)
 sudo apt-get install xdotool wmctrl
 
-pip install pyqt6 pyqt6-webengine google-genai psutil pyautogui pyperclip sounddevice numpy pynput
+pip install -r requirements.txt
 ```
 
 ### macOS
@@ -170,7 +175,7 @@ pip install pyqt6 pyqt6-webengine google-genai psutil pyautogui pyperclip soundd
 # Audio backend
 brew install portaudio
 
-pip install pyqt6 pyqt6-webengine google-genai psutil pyautogui pyperclip sounddevice numpy pynput
+pip install -r requirements.txt
 ```
 
 ---
@@ -314,15 +319,15 @@ graph TB
         TELEMETRY["Telemetry Dashboard"]
         REACTOR["Arc Reactor"]
         CHAT["Chat Log"]
-        INPUT["Command Input + Controls"]
+        INPUT["Command Input and Controls"]
     end
 
-    subgraph CORE["JarvisCore (asyncio)"]
+    subgraph CORE["JarvisCore asyncio"]
         GEMINI["Gemini Live Session"]
-        AUDIO["Audio Engine<br/>Player / Recorder"]
-        TOOLS["Tool Registry<br/>25+ Functions"]
+        AUDIO["Audio Engine"]
+        TOOLS["Tool Registry"]
         HISTORY["History Manager"]
-        WATCHDOG["Watchdog (45s)"]
+        WATCHDOG["Watchdog 45s"]
         APPROVAL["Approval System"]
     end
 
@@ -341,7 +346,7 @@ graph TB
 |--------|--------------|
 | `JarvisMainWindow` | PyQt6 shell, system tray, global hotkey, telemetry bridge |
 | `JarvisCore` | Asyncio event loop, Gemini session management, tool dispatch |
-| `PyBridge` | QWebChannel QObject — Python ↔ JavaScript signal/slot bridge |
+| `PyBridge` | QWebChannel QObject — Python to JavaScript signal/slot bridge |
 | `AudioPlayer` | `sounddevice` RawOutputStream with volume scaling |
 | `AudioRecorder` | `sounddevice` RawInputStream with 100ms batching |
 | `TelemetryWorker` | `psutil` polling thread (1s interval) |
@@ -385,6 +390,17 @@ pip install numpy --only-binary :all:
 
 ### Connection timeouts
 The watchdog (45s) will auto-relink. Check `jarvis.log` for detailed error traces.
+
+---
+
+## Contributing
+
+1. Fork the repo
+2. Create a feature branch (`git checkout -b feature/amazing-thing`)
+3. Verify syntax: `python -m py_compile jarvis.py`
+4. Submit a Pull Request
+
+Please keep it single-file unless there's a compelling reason to split. That's the core philosophy.
 
 ---
 
