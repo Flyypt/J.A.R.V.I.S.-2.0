@@ -5632,7 +5632,7 @@ class JarvisMainWindow(QMainWindow):
             self.unsetCursor()
         super().changeEvent(event)
 
-        def _setup_tray(self):
+    def _setup_tray(self):
         """Create system tray icon with context menu."""
         self.tray = QSystemTrayIcon(self)
         self.tray.setToolTip("J.A.R.V.I.S. Core Matrix")
@@ -5670,7 +5670,7 @@ class JarvisMainWindow(QMainWindow):
                 self.raise_()
                 self.activateWindow()
 
-        def _setup_global_hotkey(self):
+    def _setup_global_hotkey(self):
         if HAS_PYNPUT:
             try:
                 hotkey_str = self.config.get("global_hotkey", "ctrl+alt+j")
