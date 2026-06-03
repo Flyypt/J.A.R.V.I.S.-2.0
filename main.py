@@ -4022,7 +4022,7 @@ class JarvisCore:
     # ----- Internet -----
     def _tool_web_search(self, query: str, max_results: int = 5):
         """Multi-engine web search with fallback."""
-        return _web_search(query, max_results)
+        return _web_search_ddg(query, max_results)
 
     def _tool_fetch_url(self, url: str, max_chars: int = 8000):
         """Fetch a URL and return extracted text."""
