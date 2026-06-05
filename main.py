@@ -24,6 +24,9 @@ import ipaddress
 import socket
 import ast
 import datetime
+import smtplib
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Optional, Callable, Dict, Any
 try:
@@ -73,23 +76,7 @@ try:
 except ImportError:
     HAS_REQUESTS = False
 
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except ImportError:
-    HAS_NUMPY = False
 
-try:
-    from pynput.keyboard import GlobalHotKeys
-    HAS_PYNPUT = True
-except ImportError:
-    HAS_PYNPUT = False
-
-import logging
-from logging.handlers import RotatingFileHandler
-import tempfile
-import base64
-import difflib
 
 from PyQt6.QtCore import QUrl, pyqtSlot, QObject, QThread, pyqtSignal, QTimer, QMetaObject, Qt, QEvent, QRect
 from PyQt6.QtWidgets import QApplication, QMainWindow, QSystemTrayIcon, QMenu, QFileDialog
@@ -1232,14 +1219,7 @@ UI_HTML = """
             transform: scale(0.96);
             box-shadow: 0 0 15px rgba(0,212,255,0.6);
         }
-        /* UX: Smoother message entrance */
-        .msg {
-            animation: msg-slide-in 0.35s cubic-bezier(0.22, 1, 0.36, 1);
-        }
-        @keyframes msg-slide-in {
-            from { opacity: 0; transform: translateY(8px); }
-            to   { opacity: 1; transform: translateY(0); }
-        }
+
         /* UX: Panel subtle hover lift */
         .hud-panel {
             transition: box-shadow 0.3s ease, border-color 0.3s ease;
@@ -1337,13 +1317,8 @@ UI_HTML = """
             background: rgba(0, 212, 255, 0.15); border-color: var(--jarvis-cyan);
             box-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
         }
-        .theme-toggle:hover {
-            background: rgba(0, 212, 255, 0.15); border-color: var(--jarvis-cyan);
-            box-shadow: 0 0 12px rgba(0, 212, 255, 0.2);
-        }
         .quick-actions {
-            position: fixed; top: 46px; left: 50%; transform: translateX(-50%);
-            margin-left: 180px;  /* shift right from center */
+            position: fixed; top: 46px; right: 100px;
             z-index: 100;
             display: flex; gap: 6px;
         }
@@ -1360,8 +1335,7 @@ UI_HTML = """
             transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0, 212, 255, 0.15);
         }
         .conn-indicator {
-            position: fixed; top: 46px; left: 50%; transform: translateX(-50%);
-            margin-left: -200px;  /* shift left from center */
+            position: fixed; top: 46px; left: 14px;
             z-index: 100; display: flex; align-items: center; gap: 8px;
             background: rgba(4, 14, 32, 0.75); border: 1px solid rgba(0, 212, 255, 0.15);
             padding: 5px 14px; border-radius: 14px; backdrop-filter: blur(10px);
@@ -1374,9 +1348,8 @@ UI_HTML = """
         }
         .conn-dot.weak { background: #ffb703; box-shadow: 0 0 8px rgba(255, 183, 3, 0.5); }
         .conn-dot.dead { background: #ff4d4d; box-shadow: 0 0 8px rgba(255, 77, 77, 0.5); }
-        .mem-bar {
-            position: fixed; top: 82px; left: 50%; transform: translateX(-50%);
-            margin-left: -200px; z-index: 100;
+        #mem-bar-indicator {
+            position: fixed; top: 82px; left: 14px; z-index: 100;
             font-family: var(--font-mono); font-size: 9px; color: var(--text-dim);
             letter-spacing: 1px; background: rgba(4, 14, 32, 0.6);
             border: 1px solid rgba(0, 212, 255, 0.1); padding: 4px 10px;
@@ -1402,12 +1375,6 @@ UI_HTML = """
             }
         }, 8000);
 
-        // Also try at 3 seconds as a quick fallback
-        setTimeout(function() {
-            if (typeof bridge !== 'undefined' && bridge) {
-                setBootDone();
-            }
-        }, 3000);
 
         let bridge = null;
         let activeJarvisMsg = null;
@@ -1513,6 +1480,9 @@ function initBridge() {
         bridge.approvalRequested.connect((id, tool, args) => showApprovalModal(id, tool, args));
         bridge.audioDevicesListed.connect((json) => populateAudioDevices(JSON.parse(json)));
         bridge.configPushed.connect((json) => applyConfig(JSON.parse(json)));
+        bridge.bookmarksListed.connect((json) => showBookmarksDialog(json));
+        bridge.connectionStatusUpdated.connect((status, latency) => updateConnectionStatus(status, latency));
+        bridge.memoryUsageUpdated.connect((used, total) => updateMemBar(used, total));
 
         setStatus('READY');
         setBootDone();
@@ -1630,7 +1600,7 @@ function initBridge() {
         }
 
         function updateMemBar(used, total) {
-            const bar = document.getElementById('mem-bar');
+            const bar = document.getElementById('mem-bar-indicator');
             if (bar) bar.innerText = 'MEM: ' + used + ' / ' + total;
         }
 
@@ -1672,7 +1642,13 @@ function initBridge() {
                 });
             }
             log.appendChild(div);
-            if (!userScrolled) log.scrollTop = log.scrollHeight;
+            const scrollBtn = document.getElementById('log-scroll-ok');
+            if (!userScrolled) {
+                log.scrollTop = log.scrollHeight;
+                if (scrollBtn) scrollBtn.style.display = 'none';
+            } else {
+                if (scrollBtn) scrollBtn.style.display = 'block';
+            }
             return div;
         }
 
@@ -1698,7 +1674,13 @@ function initBridge() {
                         addCopyBtn(b);
                     });
                     const log = document.getElementById('log-area');
-                    if (log && !userScrolled) log.scrollTop = log.scrollHeight;
+                    const scrollBtn2 = document.getElementById('log-scroll-ok');
+                    if (log && !userScrolled) {
+                        log.scrollTop = log.scrollHeight;
+                        if (scrollBtn2) scrollBtn2.style.display = 'none';
+                    } else if (scrollBtn2) {
+                        scrollBtn2.style.display = 'block';
+                    }
                 }
                 if (jarvisStreamTimer) clearTimeout(jarvisStreamTimer);
                 jarvisStreamTimer = setTimeout(finalizeJarvis, 1500);
@@ -1894,6 +1876,42 @@ function initBridge() {
             const log = document.getElementById('log-area');
             if (log) log.innerHTML = '';
         }
+
+        function changeVolume(v) { safeBridgeCall('setVolume', parseFloat(v)); }
+        function changeAudioDevice(kind, deviceId) { safeBridgeCall('setAudioDevice', kind, String(deviceId)); }
+
+        function showBookmarksDialog(bookmarksJson) {
+            try {
+                const data = JSON.parse(bookmarksJson);
+                alert(data);
+            } catch(e) {
+                showToast(bookmarksJson, '');
+            }
+        }
+
+        // Command history: Up/Down arrow navigation
+        document.addEventListener('keydown', function(e) {
+            const input = document.getElementById('cmd-input');
+            if (!input || document.activeElement !== input) return;
+            if (e.key === 'ArrowUp') {
+                e.preventDefault();
+                if (cmdIndex > 0) {
+                    cmdIndex--;
+                    input.value = cmdHistory[cmdIndex] || '';
+                }
+            } else if (e.key === 'ArrowDown') {
+                e.preventDefault();
+                if (cmdIndex < cmdHistory.length - 1) {
+                    cmdIndex++;
+                    input.value = cmdHistory[cmdIndex] || '';
+                } else {
+                    cmdIndex = cmdHistory.length;
+                    input.value = '';
+                }
+            } else if (e.key === 'Escape') {
+                input.blur();
+            }
+        });
     </script>
 </head>
 <body>
@@ -1947,7 +1965,7 @@ function initBridge() {
         <span id="conn-text">ONLINE</span>
     </div>
 
-    <div class="mem-bar" id="mem-bar">MEM: --</div>
+    <div class="mem-bar" id="mem-bar-indicator">MEM: --</div>
 
     <div id="boot-overlay">
         <svg width="80" height="80" viewBox="0 0 300 300" style="margin-bottom:20px; filter:drop-shadow(0 0 20px rgba(0,212,255,0.4));">
@@ -2130,7 +2148,14 @@ function initBridge() {
         </div>
         <div class="hud-panel" id="right-panel">
             <div class="panel-label">NEURAL ACTIVITY <span>// COMMS</span></div>
-            <div id="log-area"></div>
+            <div id="log-area" onscroll="
+                const nearBottom = this.scrollTop + this.clientHeight >= this.scrollHeight - 20;
+                if (nearBottom && userScrolled) { userScrolled = false; document.getElementById('log-scroll-ok').style.display='none'; }
+                else if (!nearBottom && this.scrollHeight > this.clientHeight) { userScrolled = true; }
+            "></div>
+            <div id="log-scroll-ok" style="display:none;position:absolute;bottom:36px;right:12px;z-index:5;">
+                <button class="hud-btn" onclick="userScrolled=false;document.getElementById('log-area').scrollTop=document.getElementById('log-area').scrollHeight;" title="Resume auto-scroll">&#x25BC; FOLLOW</button>
+            </div>
             <div class="typing-indicator" id="typing-indicator">
                 <div class="typing-dot"></div>
                 <div class="typing-dot"></div>
@@ -2141,7 +2166,10 @@ function initBridge() {
     </main>
     <footer>
         <div class="input-row">
-            <input type="text" id="cmd-input" placeholder="Awaiting command, Sir..." autocomplete="off" onkeydown="if(event.key==='Enter' && !event.isComposing){sendCmd();return false;}">
+            <input type="text" id="cmd-input" placeholder="Awaiting command, Sir..." autocomplete="off"
+                onkeydown="if(event.key==='Enter' && !event.isComposing){sendCmd();return false;}"
+                onfocus="userScrolled=false;"
+                oninput="if(userScrolled){const log=document.getElementById('log-area'); if(log && log.scrollTop + log.clientHeight >= log.scrollHeight - 20){userScrolled=false;}}">
             <button class="exec-btn" onclick="sendCmd()">EXECUTE</button>
         </div>
         <div class="controls-row">
@@ -2160,7 +2188,23 @@ function initBridge() {
                     <span class="voice-track" style="position:absolute;cursor:pointer;top:0;left:0;right:0;bottom:0;background:rgba(0,212,255,0.1);border:1px solid rgba(0,212,255,0.2);transition:.4s;border-radius:20px;"></span>
                     <span class="voice-slider" style="position:absolute;content:'';height:12px;width:12px;left:2px;bottom:2px;background:#5a7a99;transition:.4s;border-radius:50%;"></span>
                 </label>
-                </div>
+            </div>
+            <div class="ctrl-group">
+                <span class="ctrl-label">Output</span>
+                <select id="audio-out-select" onchange="changeAudioDevice('output', this.value)">
+                    <option value="">Default</option>
+                </select>
+            </div>
+            <div class="ctrl-group">
+                <span class="ctrl-label">Input</span>
+                <select id="audio-in-select" onchange="changeAudioDevice('input', this.value)">
+                    <option value="">Default</option>
+                </select>
+            </div>
+            <div class="ctrl-group">
+                <span class="ctrl-label">Vol</span>
+                <input type="range" id="vol-slider" min="0" max="2" step="0.1" value="1" onchange="changeVolume(this.value)" title="Volume">
+            </div>
             <button id="mic-btn" class="hud-btn mic-btn-inactive" onclick="toggleMic()" disabled>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v4M8 23h8"/></svg>
                 <span>MIC</span>
@@ -5723,7 +5767,7 @@ class JarvisMainWindow(QMainWindow):
             self.bridge.audioDevicesListed.emit(payload)
         except Exception as e:
             logger.warning(f"Audio device listing failed: {e}")
-
+ 
     def _update_stats(self, cpu, mem_pct, disk_pct, net_in, net_out, win_title):
         if self.ui_ready and self.core:
             self.bridge.telemetryUpdated.emit(cpu, mem_pct, disk_pct, net_in, net_out, win_title)
