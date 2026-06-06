@@ -1,4 +1,3 @@
-[CONTRIBUTING.md](https://github.com/user-attachments/files/28669147/CONTRIBUTING.md)
 # Contributing to J.A.R.V.I.S. 2.0
 
 Thank you for your interest in contributing to J.A.R.V.I.S.! This document outlines the process and guidelines for contributing to this project.
