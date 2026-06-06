@@ -1083,7 +1083,7 @@ UI_HTML = """
         .reactor-svg {
             position: relative; z-index: 2;
             width: 100%; height: 100%;
-            filter: drop-shadow(0 0 30px rgba(0, 212, 255, 0.35));
+            filter: drop-shadow(0 0 30px rgba(0, 197, 255, 0.4));
         }
         .voice-orbit {
             position: absolute; top: 0; left: 0; width: 100%; height: 100%;
@@ -3153,24 +3153,24 @@ function initBridge() {
                 <div class="voice-orbit"><canvas id="voice-orbit" width="600" height="600"></canvas></div>
                 <svg class="reactor-svg" viewBox="0 0 300 300">
                     <defs>
-                        <!-- Core radial gradient — white center fading to cyan -->
+                        <!-- Core radial gradient — pure white center, electric cyan halo -->
                         <radialGradient id="coreGrad" cx="50%" cy="50%" r="50%">
-                            <stop offset="0%"  stop-color="#ffffff" />
-                            <stop offset="30%" stop-color="#e0f7ff" />
-                            <stop offset="60%" stop-color="#00d4ff" />
-                            <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
+                            <stop offset="0%"   stop-color="#FFFFFF" />
+                            <stop offset="25%"  stop-color="#E8FBFF" />
+                            <stop offset="55%"  stop-color="#00C5FF" />
+                            <stop offset="100%" stop-color="#00A8E8" stop-opacity="0" />
                         </radialGradient>
                         <!-- Outer bloom — large soft glow behind the reactor -->
                         <radialGradient id="bloomGrad" cx="50%" cy="50%" r="50%">
-                            <stop offset="0%"  stop-color="#00d4ff" stop-opacity="0.12" />
-                            <stop offset="60%" stop-color="#00d4ff" stop-opacity="0.04" />
-                            <stop offset="100%" stop-color="#00d4ff" stop-opacity="0" />
+                            <stop offset="0%"   stop-color="#00C5FF" stop-opacity="0.15" />
+                            <stop offset="60%"  stop-color="#00A8E8" stop-opacity="0.05" />
+                            <stop offset="100%" stop-color="#00A8E8" stop-opacity="0" />
                         </radialGradient>
-                        <!-- Ring metallic gradient -->
+                        <!-- Ring metallic gradient — cyan to electric blue -->
                         <linearGradient id="ringMetal" x1="0%" y1="0%" x2="100%" y2="100%">
-                            <stop offset="0%"  stop-color="rgba(0,212,255,0.35)" />
-                            <stop offset="50%" stop-color="rgba(0,212,255,0.15)" />
-                            <stop offset="100%" stop-color="rgba(0,212,255,0.35)" />
+                            <stop offset="0%"   stop-color="rgba(0, 197, 255, 0.45)" />
+                            <stop offset="50%"  stop-color="rgba(0, 168, 232, 0.20)" />
+                            <stop offset="100%" stop-color="rgba(0, 197, 255, 0.45)" />
                         </linearGradient>
                         <!-- SVG filter for soft bloom -->
                         <filter id="bloom" x="-50%" y="-50%" width="200%" height="200%">
@@ -3189,23 +3189,23 @@ function initBridge() {
                     <!-- LAYER 1: Outer housing ring (static) -->
                     <g class="ring-housing">
                         <!-- Main outer ring — thick metallic band -->
-                        <circle cx="150" cy="150" r="130" fill="none" stroke="rgba(0,212,255,0.12)" stroke-width="3" />
-                        <circle cx="150" cy="150" r="126" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="1" />
+                        <circle cx="150" cy="150" r="130" fill="none" stroke="rgba(0, 197, 255, 0.12)" stroke-width="3" />
+                        <circle cx="150" cy="150" r="126" fill="none" stroke="rgba(0, 168, 232, 0.06)" stroke-width="1" />
                         <!-- Tick marks around the outer ring — 36 marks at 10-degree intervals -->
-                        <g opacity="0.3">
-                            <line x1="150" y1="18"  x2="150" y2="28"  stroke="#00d4ff" stroke-width="1.5" />
-                            <line x1="150" y1="272" x2="150" y2="282" stroke="#00d4ff" stroke-width="1.5" />
-                            <line x1="18"  y1="150" x2="28"  y2="150" stroke="#00d4ff" stroke-width="1.5" />
-                            <line x1="272" y1="150" x2="282" y2="150" stroke="#00d4ff" stroke-width="1.5" />
+                        <g opacity="0.35">
+                            <line x1="150" y1="18"  x2="150" y2="28"  stroke="#00C5FF" stroke-width="1.5" />
+                            <line x1="150" y1="272" x2="150" y2="282" stroke="#00C5FF" stroke-width="1.5" />
+                            <line x1="18"  y1="150" x2="28"  y2="150" stroke="#00C5FF" stroke-width="1.5" />
+                            <line x1="272" y1="150" x2="282" y2="150" stroke="#00C5FF" stroke-width="1.5" />
                             <!-- 45-degree marks -->
-                            <line x1="54"  y1="54"  x2="61"  y2="61"  stroke="#00d4ff" stroke-width="1" />
-                            <line x1="239" y1="54"  x2="246" y2="61"  stroke="#00d4ff" stroke-width="1" />
-                            <line x1="54"  y1="239" x2="61"  y2="246" stroke="#00d4ff" stroke-width="1" />
-                            <line x1="239" y1="239" x2="246" y2="246" stroke="#00d4ff" stroke-width="1" />
+                            <line x1="54"  y1="54"  x2="61"  y2="61"  stroke="#00A8E8" stroke-width="1" />
+                            <line x1="239" y1="54"  x2="246" y2="61"  stroke="#00A8E8" stroke-width="1" />
+                            <line x1="54"  y1="239" x2="61"  y2="246" stroke="#00A8E8" stroke-width="1" />
+                            <line x1="239" y1="239" x2="246" y2="246" stroke="#00A8E8" stroke-width="1" />
                         </g>
                         <!-- Thin guide circles -->
-                        <circle cx="150" cy="150" r="118" fill="none" stroke="rgba(0,212,255,0.06)" stroke-width="0.5" />
-                        <circle cx="150" cy="150" r="100" fill="none" stroke="rgba(0,212,255,0.04)" stroke-width="0.5" />
+                        <circle cx="150" cy="150" r="118" fill="none" stroke="rgba(0, 197, 255, 0.06)" stroke-width="0.5" />
+                        <circle cx="150" cy="150" r="100" fill="none" stroke="rgba(0, 168, 232, 0.04)" stroke-width="0.5" />
                     </g>
 
                     <!-- LAYER 2: Outer rotating ring — 3 segmented arcs -->
@@ -3214,42 +3214,42 @@ function initBridge() {
                         <circle cx="150" cy="150" r="112" fill="none" stroke="url(#ringMetal)" stroke-width="4"
                             stroke-dasharray="100 30 100 30 100 30" stroke-linecap="round" />
                         <!-- Dot accents at segment midpoints -->
-                        <circle cx="150" cy="38"  r="3" fill="#00d4ff" opacity="0.6" />
-                        <circle cx="247" cy="206" r="3" fill="#00d4ff" opacity="0.6" />
-                        <circle cx="53"  cy="206" r="3" fill="#00d4ff" opacity="0.6" />
+                        <circle cx="150" cy="38"  r="3" fill="#00C5FF" opacity="0.75" />
+                        <circle cx="247" cy="206" r="3" fill="#00C5FF" opacity="0.75" />
+                        <circle cx="53"  cy="206" r="3" fill="#00C5FF" opacity="0.75" />
                     </g>
 
                     <!-- LAYER 3: Mid rotating ring — finer segments, counter-rotate -->
                     <g class="ring-mid" filter="url(#bloom)">
-                        <circle cx="150" cy="150" r="92" fill="none" stroke="rgba(0,212,255,0.3)" stroke-width="3"
+                        <circle cx="150" cy="150" r="92" fill="none" stroke="rgba(0, 197, 255, 0.35)" stroke-width="3"
                             stroke-dasharray="40 15 40 15 40 15 40 15 40 15 40 15" stroke-linecap="round" />
                         <!-- Small triangular markers at 6 positions -->
-                        <polygon points="150,55 146,63 154,63" fill="#00d4ff" opacity="0.5" />
-                        <polygon points="233,100 225,96 225,104" fill="#00d4ff" opacity="0.5" />
-                        <polygon points="233,200 225,196 225,204" fill="#00d4ff" opacity="0.5" />
-                        <polygon points="150,245 146,237 154,237" fill="#00d4ff" opacity="0.5" />
-                        <polygon points="67,200 75,196 75,204" fill="#00d4ff" opacity="0.5" />
-                        <polygon points="67,100 75,96 75,104" fill="#00d4ff" opacity="0.5" />
+                        <polygon points="150,55 146,63 154,63" fill="#00C5FF" opacity="0.6" />
+                        <polygon points="233,100 225,96 225,104" fill="#00C5FF" opacity="0.6" />
+                        <polygon points="233,200 225,196 225,204" fill="#00C5FF" opacity="0.6" />
+                        <polygon points="150,245 146,237 154,237" fill="#00C5FF" opacity="0.6" />
+                        <polygon points="67,200 75,196 75,204" fill="#00C5FF" opacity="0.6" />
+                        <polygon points="67,100 75,96 75,104" fill="#00C5FF" opacity="0.6" />
                     </g>
 
                     <!-- LAYER 4: Inner rotating ring — tight dashed, fast -->
                     <g class="ring-inner" filter="url(#bloom)">
-                        <circle cx="150" cy="150" r="72" fill="none" stroke="rgba(0,212,255,0.35)" stroke-width="2.5"
+                        <circle cx="150" cy="150" r="72" fill="none" stroke="rgba(0, 197, 255, 0.4)" stroke-width="2.5"
                             stroke-dasharray="18 8 18 8 18 8 18 8" stroke-linecap="round" />
                     </g>
 
                     <!-- Shimmer ring — faint rotating highlight -->
-                    <g class="ring-shimmer" opacity="0.15">
-                        <circle cx="150" cy="150" r="112" fill="none" stroke="#fff" stroke-width="1"
+                    <g class="ring-shimmer" opacity="0.18">
+                        <circle cx="150" cy="150" r="112" fill="none" stroke="#FFFFFF" stroke-width="1"
                             stroke-dasharray="60 640" stroke-linecap="round" />
                     </g>
 
                     <!-- Static inner guide rings -->
-                    <circle cx="150" cy="150" r="58" fill="none" stroke="rgba(0,212,255,0.08)" stroke-width="1" />
-                    <circle cx="150" cy="150" r="48" fill="none" stroke="rgba(0,212,255,0.1)" stroke-width="1.5" />
+                    <circle cx="150" cy="150" r="58" fill="none" stroke="rgba(0, 197, 255, 0.10)" stroke-width="1" />
+                    <circle cx="150" cy="150" r="48" fill="none" stroke="rgba(0, 197, 255, 0.12)" stroke-width="1.5" />
 
                     <!-- Radial spokes — thin lines from core outward (6 spokes) -->
-                    <g opacity="0.15" stroke="#00d4ff" stroke-width="0.8">
+                    <g opacity="0.20" stroke="#00A8E8" stroke-width="0.8">
                         <line x1="150" y1="92"  x2="150" y2="55" />
                         <line x1="200" y1="121" x2="233" y2="100" />
                         <line x1="200" y1="179" x2="233" y2="200" />
@@ -3260,13 +3260,13 @@ function initBridge() {
 
                     <!-- LAYER 5: Core — multi-layer pulsing glow -->
                     <!-- Outer bloom -->
-                    <circle cx="150" cy="150" r="44" fill="url(#coreGrad)" class="core-bloom" opacity="0.3" />
+                    <circle cx="150" cy="150" r="44" fill="url(#coreGrad)" class="core-bloom" opacity="0.35" />
                     <!-- Main core glow -->
                     <circle cx="150" cy="150" r="34" fill="url(#coreGrad)" class="core-glow" id="reactor-core" filter="url(#coreBloom)" />
                     <!-- Inner bright ring -->
-                    <circle cx="150" cy="150" r="22" fill="none" stroke="rgba(255,255,255,0.5)" stroke-width="1.5" />
+                    <circle cx="150" cy="150" r="22" fill="none" stroke="rgba(255,255,255,0.6)" stroke-width="1.5" />
                     <!-- White-hot center -->
-                    <circle cx="150" cy="150" r="14" fill="#fff" opacity="0.95" />
+                    <circle cx="150" cy="150" r="14" fill="#FFFFFF" opacity="0.98" />
                     <circle cx="150" cy="150" r="8"  fill="#fff" opacity="1" />
                 </svg>
             </div>
