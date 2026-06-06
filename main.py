@@ -1078,25 +1078,33 @@ UI_HTML = """
         .reactor-wrap {
             width: 320px; height: 320px; position: relative;
             display: flex; align-items: center; justify-content: center;
+            transition: filter 0.6s ease;
         }
         .reactor-svg {
+            position: relative; z-index: 2;
             width: 100%; height: 100%;
             filter: drop-shadow(0 0 30px rgba(0, 212, 255, 0.35));
         }
+        .voice-orbit {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            pointer-events: none; z-index: 1;
+        }
         /* Outer static ring — never rotates, gives the "housing" feel */
-        .ring-housing { }
+        .ring-housing { transition: stroke 0.6s ease, opacity 0.6s ease; }
         /* 3 rotating groups: each contains segments that orbit the center */
-        .ring-outer  { animation: spin-cw  30s linear infinite; transform-origin: 150px 150px; }
-        .ring-mid    { animation: spin-ccw 18s linear infinite; transform-origin: 150px 150px; }
-        .ring-inner  { animation: spin-cw  10s linear infinite; transform-origin: 150px 150px; }
+        .ring-outer  { animation: spin-cw  30s linear infinite; transform-origin: 150px 150px; transition: stroke 0.6s ease, opacity 0.6s ease; }
+        .ring-mid    { animation: spin-ccw 18s linear infinite; transform-origin: 150px 150px; transition: stroke 0.6s ease, opacity 0.6s ease; }
+        .ring-inner  { animation: spin-cw  10s linear infinite; transform-origin: 150px 150px; transition: stroke 0.6s ease, opacity 0.6s ease; }
         /* Core glow — pulsing radial bloom */
         .core-glow   {
             transform-origin: 150px 150px;
             animation: core-pulse 3s ease-in-out infinite;
+            transition: fill 0.6s ease;
         }
         .core-bloom  {
             transform-origin: 150px 150px;
             animation: core-pulse 3s ease-in-out infinite 0.3s;
+            transition: fill 0.6s ease;
         }
 
         @keyframes spin-cw  { from { transform: rotate(0deg); }   to { transform: rotate(360deg);  } }
@@ -1110,6 +1118,76 @@ UI_HTML = """
             transform-origin: 150px 150px;
             animation: spin-cw 12s linear infinite;
         }
+
+        /* === STATE-DRIVEN REACTOR COLOR ===
+           The reactor color, ring speed, and core pulse reflect real
+           JARVIS state. JS sets `data-state` on the wrap and CSS
+           re-skins the SVG. Keeps the reactor alive — it actually
+           MEANS something — without extra DOM. */
+        .reactor-wrap[data-state="offline"]  .reactor-svg { filter: drop-shadow(0 0 30px rgba(255, 77, 77, 0.45)); }
+        .reactor-wrap[data-state="offline"]  .ring-housing,
+        .reactor-wrap[data-state="offline"]  .ring-outer,
+        .reactor-wrap[data-state="offline"]  .ring-mid,
+        .reactor-wrap[data-state="offline"]  .ring-inner { stroke: #ff4d4d !important; opacity: 0.7; }
+        .reactor-wrap[data-state="offline"]  .ring-outer { animation-duration: 60s; }
+        .reactor-wrap[data-state="offline"]  .ring-mid { animation-duration: 40s; }
+        .reactor-wrap[data-state="offline"]  .ring-inner { animation-duration: 22s; }
+        .reactor-wrap[data-state="offline"]  .core-glow,
+        .reactor-wrap[data-state="offline"]  .core-bloom { fill: #ff4d4d; }
+        .reactor-wrap[data-state="offline"]  .core-glow,
+        .reactor-wrap[data-state="offline"]  .core-bloom { animation: core-pulse-fast 1.2s ease-in-out infinite; }
+
+        .reactor-wrap[data-state="thinking"] .reactor-svg { filter: drop-shadow(0 0 40px rgba(255, 183, 3, 0.55)); }
+        .reactor-wrap[data-state="thinking"] .ring-outer,
+        .reactor-wrap[data-state="thinking"] .ring-mid,
+        .reactor-wrap[data-state="thinking"] .ring-inner { stroke: #ffb703 !important; }
+        .reactor-wrap[data-state="thinking"] .ring-outer { animation-duration: 8s; }
+        .reactor-wrap[data-state="thinking"] .ring-mid { animation-duration: 4s; }
+        .reactor-wrap[data-state="thinking"] .ring-inner { animation-duration: 2s; }
+        .reactor-wrap[data-state="thinking"] .core-glow,
+        .reactor-wrap[data-state="thinking"] .core-bloom { fill: #ffb703; }
+
+        .reactor-wrap[data-state="speaking"] .reactor-svg { filter: drop-shadow(0 0 50px rgba(0, 168, 255, 0.6)); }
+        .reactor-wrap[data-state="speaking"] .ring-outer,
+        .reactor-wrap[data-state="speaking"] .ring-mid,
+        .reactor-wrap[data-state="speaking"] .ring-inner { stroke: #00a8ff !important; }
+        .reactor-wrap[data-state="speaking"] .ring-outer { animation-duration: 12s; }
+        .reactor-wrap[data-state="speaking"] .ring-mid { animation-duration: 6s; }
+        .reactor-wrap[data-state="speaking"] .ring-inner { animation-duration: 3s; }
+        .reactor-wrap[data-state="speaking"] .core-glow,
+        .reactor-wrap[data-state="speaking"] .core-bloom { fill: #00a8ff; animation: core-pulse-fast 1.6s ease-in-out infinite; }
+
+        .reactor-wrap[data-state="listening"] .reactor-svg { filter: drop-shadow(0 0 45px rgba(0, 245, 212, 0.55)); }
+        .reactor-wrap[data-state="listening"] .ring-outer,
+        .reactor-wrap[data-state="listening"] .ring-mid,
+        .reactor-wrap[data-state="listening"] .ring-inner { stroke: #00f5d4 !important; }
+        .reactor-wrap[data-state="listening"] .ring-outer { animation-duration: 6s; }
+        .reactor-wrap[data-state="listening"] .ring-mid { animation-duration: 3s; }
+        .reactor-wrap[data-state="listening"] .ring-inner { animation-duration: 1.5s; }
+        .reactor-wrap[data-state="listening"] .core-glow,
+        .reactor-wrap[data-state="listening"] .core-bloom { fill: #00f5d4; animation: core-pulse-fast 1s ease-in-out infinite; }
+
+        @keyframes core-pulse-fast {
+            0%, 100% { opacity: 0.7; transform: scale(1);    }
+            50%      { opacity: 1;   transform: scale(1.15); }
+        }
+
+        /* === Outer "voice waveform" ring — a separate circle of bars
+           that mirror mic input / TTS output level. Wired via JS. === */
+        .voice-orbit {
+            position: absolute; inset: 0; pointer-events: none;
+            display: flex; align-items: center; justify-content: center;
+        }
+        .voice-orbit canvas {
+            width: 100%; height: 100%;
+            filter: drop-shadow(0 0 6px rgba(0, 212, 255, 0.4));
+            transition: opacity 0.4s ease;
+            opacity: 0.55;
+        }
+        .reactor-wrap[data-state="offline"]  .voice-orbit canvas { opacity: 0.15; }
+        .reactor-wrap[data-state="thinking"] .voice-orbit canvas { opacity: 0.7; }
+        .reactor-wrap[data-state="speaking"] .voice-orbit canvas { opacity: 0.9; }
+        .reactor-wrap[data-state="listening"] .voice-orbit canvas { opacity: 0.9; }
 
         #audio-viz {
             position: absolute; bottom: 60px; left: 50%; transform: translateX(-50%);
@@ -1516,6 +1594,106 @@ UI_HTML = """
             background: rgba(0,100,180,0.08);
             border-color: rgba(0,100,180,0.15);
         }
+
+        /* ====== THEMES — body[data-theme] drives the whole palette ======
+           Five themes share the same variable names so every component
+           that references var(--jarvis-cyan) / --jarvis-blue / --jarvis-glow
+           / --jarvis-border / --jarvis-dark / --jarvis-panel recolors at
+           once. The 'stark' theme is the iconic Iron Man gold-on-black
+           HUD look; 'forest' and 'crimson' are bonus variants. */
+
+        /* Theme: STARK (gold + black) */
+        body[data-theme="stark"] {
+            --jarvis-cyan: #f0b400;
+            --jarvis-blue: #ff6b00;
+            --jarvis-glow: rgba(240, 180, 0, 0.28);
+            --jarvis-border: rgba(240, 180, 0, 0.16);
+            --text-primary: #fff5d6;
+            --text-dim: #8a7438;
+        }
+        body[data-theme="stark"] {
+            background-color: #0c0800;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(240,180,0,0.06) 0%, transparent 70%),
+                linear-gradient(rgba(240,180,0,0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(240,180,0,0.025) 1px, transparent 1px);
+        }
+
+        /* Theme: FOREST (emerald) */
+        body[data-theme="forest"] {
+            --jarvis-cyan: #2ed573;
+            --jarvis-blue: #1b8a4a;
+            --jarvis-glow: rgba(46, 213, 115, 0.28);
+            --jarvis-border: rgba(46, 213, 115, 0.18);
+            --text-primary: #d6ffe6;
+            --text-dim: #4a7a5e;
+        }
+        body[data-theme="forest"] {
+            background-color: #020f08;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(46,213,115,0.06) 0%, transparent 70%),
+                linear-gradient(rgba(46,213,115,0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(46,213,115,0.025) 1px, transparent 1px);
+        }
+
+        /* Theme: CRIMSON (Iron Man red) */
+        body[data-theme="crimson"] {
+            --jarvis-cyan: #ff3b3b;
+            --jarvis-blue: #b80000;
+            --jarvis-glow: rgba(255, 59, 59, 0.28);
+            --jarvis-border: rgba(255, 59, 59, 0.18);
+            --text-primary: #ffd6d6;
+            --text-dim: #8a4848;
+        }
+        body[data-theme="crimson"] {
+            background-color: #0f0202;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(255,59,59,0.07) 0%, transparent 70%),
+                linear-gradient(rgba(255,59,59,0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(255,59,59,0.025) 1px, transparent 1px);
+        }
+
+        /* Theme: PURPLE (Vision) */
+        body[data-theme="purple"] {
+            --jarvis-cyan: #c084fc;
+            --jarvis-blue: #7c3aed;
+            --jarvis-glow: rgba(192, 132, 252, 0.28);
+            --jarvis-border: rgba(192, 132, 252, 0.18);
+            --text-primary: #f3e8ff;
+            --text-dim: #6b5184;
+        }
+        body[data-theme="purple"] {
+            background-color: #0a0414;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(192,132,252,0.07) 0%, transparent 70%),
+                linear-gradient(rgba(192,132,252,0.025) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(192,132,252,0.025) 1px, transparent 1px);
+        }
+
+        /* Theme picker — a small floating panel that opens when THEME is clicked */
+        .theme-picker {
+            position: fixed; top: 70px; right: 14px; z-index: 1000;
+            display: none; flex-direction: column; gap: 6px; padding: 10px;
+            background: rgba(4, 14, 32, 0.92); border: 1px solid rgba(0, 212, 255, 0.25);
+            border-radius: 10px; backdrop-filter: blur(10px);
+            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4);
+            min-width: 140px;
+        }
+        .theme-picker.open { display: flex; }
+        .theme-pick {
+            display: flex; align-items: center; gap: 10px;
+            padding: 8px 12px; border-radius: 6px; cursor: pointer;
+            font-family: var(--font-display); font-size: 9px;
+            letter-spacing: 1.5px; color: var(--text-dim);
+            background: transparent; border: 1px solid transparent;
+            text-align: left; transition: all 0.2s;
+        }
+        .theme-pick:hover { background: rgba(0, 212, 255, 0.08); color: var(--text-primary); border-color: rgba(0, 212, 255, 0.2); }
+        .theme-pick.active { color: var(--jarvis-cyan); border-color: rgba(0, 212, 255, 0.3); background: rgba(0, 212, 255, 0.06); }
+        .theme-swatch {
+            width: 14px; height: 14px; border-radius: 50%;
+            box-shadow: 0 0 6px currentColor;
+        }
         /* UX: Input placeholder shimmer */
         #cmd-input::placeholder {
             color: var(--text-dim);
@@ -1623,10 +1801,10 @@ UI_HTML = """
             transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0, 212, 255, 0.15);
         }
         .conn-indicator {
-            position: fixed; top: 46px; left: 14px;
+            position: fixed; bottom: 8px; left: 14px;
             z-index: 100; display: flex; align-items: center; gap: 8px;
             background: rgba(4, 14, 32, 0.75); border: 1px solid rgba(0, 212, 255, 0.15);
-            padding: 5px 14px; border-radius: 14px; backdrop-filter: blur(10px);
+            padding: 4px 12px; border-radius: 12px; backdrop-filter: blur(10px);
             font-family: var(--font-display); font-size: 9px; letter-spacing: 1.5px;
             color: var(--text-dim); transition: all 0.3s;
         }
@@ -1637,11 +1815,190 @@ UI_HTML = """
         .conn-dot.weak { background: #ffb703; box-shadow: 0 0 8px rgba(255, 183, 3, 0.5); }
         .conn-dot.dead { background: #ff4d4d; box-shadow: 0 0 8px rgba(255, 77, 77, 0.5); }
         #mem-bar-indicator {
-            position: fixed; top: 82px; left: 14px; z-index: 100;
+            position: fixed; bottom: 8px; left: 50%; transform: translateX(-50%);
+            z-index: 100;
             font-family: var(--font-mono); font-size: 9px; color: var(--text-dim);
             letter-spacing: 1px; background: rgba(4, 14, 32, 0.6);
             border: 1px solid rgba(0, 212, 255, 0.1); padding: 4px 10px;
             border-radius: 6px; backdrop-filter: blur(6px);
+        }
+        #uptime-indicator {
+            position: fixed; bottom: 8px; right: 14px;
+            z-index: 100;
+            font-family: var(--font-mono); font-size: 9px; color: var(--text-dim);
+            letter-spacing: 1px; background: rgba(4, 14, 32, 0.6);
+            border: 1px solid rgba(0, 212, 255, 0.1); padding: 4px 10px;
+            border-radius: 6px; backdrop-filter: blur(6px);
+        }
+
+        /* ====== HELP / SHORTCUT OVERLAY ====== */
+        #help-overlay {
+            position: fixed; inset: 0; background: rgba(2, 5, 15, 0.92);
+            z-index: 940; display: none; align-items: center; justify-content: center;
+            backdrop-filter: blur(10px);
+            animation: fade-in 0.25s ease;
+        }
+        #help-overlay.open { display: flex; }
+        .help-card {
+            background: var(--jarvis-panel); border: 1px solid var(--jarvis-border);
+            padding: 32px 36px; border-radius: 14px; max-width: 560px; width: 92%;
+            box-shadow: 0 0 60px rgba(0, 212, 255, 0.15);
+            position: relative;
+        }
+        .help-card h2 {
+            font-family: var(--font-display); font-size: 18px; letter-spacing: 4px;
+            color: var(--jarvis-cyan); margin-bottom: 6px;
+        }
+        .help-card .help-sub {
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 3px;
+            color: var(--text-dim); margin-bottom: 22px; opacity: 0.7;
+        }
+        .help-row {
+            display: flex; align-items: center; justify-content: space-between;
+            padding: 9px 0; border-bottom: 1px dashed rgba(0, 212, 255, 0.1);
+            font-size: 12px;
+        }
+        .help-row:last-child { border-bottom: none; }
+        .help-label { color: var(--text-primary); }
+        .help-keys { display: flex; gap: 4px; align-items: center; }
+        .help-close {
+            position: absolute; top: 12px; right: 12px; width: 26px; height: 26px;
+            background: transparent; border: 1px solid var(--jarvis-border);
+            color: var(--text-dim); border-radius: 4px; cursor: pointer;
+            display: flex; align-items: center; justify-content: center;
+            transition: all 0.2s;
+        }
+        .help-close:hover { border-color: var(--jarvis-cyan); color: var(--jarvis-cyan); }
+        .kbd {
+            font-family: var(--font-mono); font-size: 10px;
+            background: rgba(0, 212, 255, 0.08); border: 1px solid var(--jarvis-border);
+            color: var(--jarvis-cyan); padding: 2px 7px; border-radius: 4px;
+            min-width: 22px; text-align: center; box-shadow: inset 0 -1px 0 rgba(0,0,0,0.4);
+        }
+        @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+        /* ====== SCROLL-TO-BOTTOM PILL ====== */
+        #scroll-bottom {
+            position: absolute; bottom: 16px; right: 24px; z-index: 5;
+            display: none; align-items: center; gap: 6px;
+            background: rgba(0, 212, 255, 0.12); border: 1px solid var(--jarvis-cyan);
+            color: var(--jarvis-cyan); padding: 6px 12px; border-radius: 14px;
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 1.5px;
+            cursor: pointer; backdrop-filter: blur(6px);
+            transition: all 0.25s ease;
+        }
+        #scroll-bottom:hover {
+            background: var(--jarvis-cyan); color: var(--jarvis-dark);
+            box-shadow: 0 0 12px rgba(0, 212, 255, 0.3);
+        }
+        #scroll-bottom.visible { display: flex; }
+
+        /* ====== TITLE BAR "TITLE" — TYPED LIVE ====== */
+        .tb-name.typing::after {
+            content: '_'; margin-left: 1px; opacity: 0.7;
+            animation: caret-blink 0.9s steps(1) infinite;
+        }
+        @keyframes caret-blink { 50% { opacity: 0; } }
+
+        /* ====== RESPONSIVE LAYOUT FALLBACK ====== */
+        @media (max-width: 1180px) {
+            main { grid-template-columns: 240px 1fr 360px; }
+            .reactor-wrap { width: 260px; height: 260px; }
+        }
+        @media (max-width: 980px) {
+            main { grid-template-columns: 1fr; grid-template-rows: auto auto 1fr; }
+            #left-panel, #center-panel { display: none; }
+            .reactor-wrap { width: 200px; height: 200px; }
+        }
+
+        /* ====== FOCUS RINGS (accessibility) ====== */
+        button:focus-visible, select:focus-visible, input:focus-visible,
+        .tb-btn:focus-visible, .hud-btn:focus-visible, .exec-btn:focus-visible {
+            outline: 2px solid var(--jarvis-cyan);
+            outline-offset: 2px;
+        }
+        /* remove default focus outline (we draw our own above) */
+        button:focus { outline: none; }
+
+        /* ====== MSG USER bubble — Tony Stark's own chat line. Subtle
+           gold-tinted so it's instantly distinguishable from JARVIS. ====== */
+        .msg-user { border-left-color: rgba(255, 183, 3, 0.55); }
+        .msg-user .msg-sender { color: #ffb703; }
+        .msg-user .msg-body p { color: #fff; }
+
+        /* ====== MSG COPY/REGEN/REPLAY per-row hover actions ====== */
+        .msg-actions {
+            position: absolute; top: 8px; right: 8px; display: none; gap: 4px;
+        }
+        .msg:hover .msg-actions { display: flex; }
+        .msg-action-btn {
+            background: rgba(0, 212, 255, 0.08); border: 1px solid var(--jarvis-border);
+            color: var(--text-dim); padding: 3px 8px; border-radius: 3px;
+            font-family: var(--font-display); font-size: 8px; letter-spacing: 1px;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .msg-action-btn:hover { background: rgba(0, 212, 255, 0.2); color: var(--jarvis-cyan); border-color: var(--jarvis-cyan); }
+
+        /* ====== HEADER CHAT TOOLBAR (clear, export, regen) ====== */
+        .chat-toolbar {
+            display: flex; gap: 4px; align-items: center;
+        }
+        .icon-btn {
+            background: transparent; border: 1px solid transparent;
+            color: var(--text-dim); padding: 4px 8px; border-radius: 4px;
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 1px;
+            cursor: pointer; transition: all 0.2s;
+        }
+        .icon-btn:hover { color: var(--jarvis-cyan); border-color: var(--jarvis-border); background: rgba(0,212,255,0.05); }
+
+        /* ====== AUDIO ACTIVITY RING (the orb that throbs while mic/voice
+           is live). When the level hits, the ring expands. ====== */
+        .audio-orb {
+            position: absolute; top: 50%; left: 50%;
+            transform: translate(-50%, -50%);
+            width: 90px; height: 90px; border-radius: 50%;
+            background: radial-gradient(circle, rgba(0, 212, 255, 0.3) 0%, transparent 70%);
+            pointer-events: none; opacity: 0;
+            transition: opacity 0.4s;
+        }
+        .audio-orb.active { opacity: 1; animation: orb-pulse 1s ease-in-out infinite; }
+        @keyframes orb-pulse {
+            0%, 100% { transform: translate(-50%, -50%) scale(1); }
+            50%      { transform: translate(-50%, -50%) scale(1.15); }
+        }
+
+        /* ====== TOOLTIP for HUD buttons ====== */
+        [data-tip] { position: relative; }
+        [data-tip]:hover::before {
+            content: attr(data-tip);
+            position: absolute; bottom: calc(100% + 6px); left: 50%;
+            transform: translateX(-50%);
+            background: rgba(2, 5, 15, 0.95); border: 1px solid var(--jarvis-cyan);
+            color: var(--jarvis-cyan); padding: 4px 10px; border-radius: 4px;
+            font-family: var(--font-display); font-size: 9px; letter-spacing: 1px;
+            white-space: nowrap; z-index: 200; pointer-events: none;
+            box-shadow: 0 0 12px rgba(0, 212, 255, 0.25);
+        }
+
+        /* ====== FULLSCREEN MODE — hide title bar drag overlay hint ====== */
+        body.fullscreen .conn-indicator,
+        body.fullscreen .theme-toggle,
+        body.fullscreen .quick-actions { top: 8px; }
+        body.fullscreen #mem-bar-indicator { top: 44px; }
+        /* Bottom status bar slightly higher in fullscreen for visibility */
+        body.fullscreen .conn-indicator,
+        body.fullscreen #mem-bar-indicator,
+        body.fullscreen #uptime-indicator { bottom: 4px; }
+
+        /* ====== "WELCOME STAGE" cinematic — used right after boot. A
+           single, line-at-a-time Tony Stark greeting reveals. ====== */
+        .cinematic {
+            animation: cin-line-in 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+            opacity: 0;
+        }
+        @keyframes cin-line-in {
+            from { opacity: 0; transform: translateY(8px); filter: blur(4px); }
+            to   { opacity: 1; transform: translateY(0); filter: blur(0); }
         }
     </style>
         <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
@@ -1695,6 +2052,14 @@ UI_HTML = """
             const el = document.getElementById('boot-overlay');
             if (el && !el.classList.contains('fade-out')) {
                 el.classList.add('fade-out');
+            }
+            // Cinematic Tony Stark welcome — the first JARVIS line in the
+            // log. Only fires the first time boot completes.
+            if (!window._welcomePlayed) {
+                window._welcomePlayed = true;
+                setTimeout(() => {
+                    appendLog('JARVIS', 'Good ' + (new Date().getHours() < 12 ? 'morning' : new Date().getHours() < 18 ? 'afternoon' : 'evening') + ', Sir. All systems are at your disposal. How may I be of service?', false);
+                }, 600);
             }
         }
         function formatTokens(n) {
@@ -1848,15 +2213,62 @@ function initBridge() {
             if (path) safeBridgeCall('exportChat', path);
         }
 
-        function toggleTheme() {
-            document.body.classList.toggle('light-theme');
-            const isLight = document.body.classList.contains('light-theme');
-            try {
-                localStorage.setItem('jarvis-theme', isLight ? 'light' : 'dark');
-            } catch(e) {
-                // localStorage may be disabled in data: URLs
+        // Six theme presets (see CSS rules with body[data-theme="..."]).
+        // 'midnight' is the default cyan-on-near-black JARVIS look.
+        const THEMES = ['midnight', 'stark', 'forest', 'crimson', 'purple', 'light'];
+
+        function applyTheme(name) {
+            // Clear all theme attributes and class-based fallbacks first
+            document.body.removeAttribute('data-theme');
+            document.body.classList.remove('light-theme');
+            if (name === 'midnight') {
+                // default — no overrides
+            } else if (name === 'light') {
+                // legacy light mode used a class; keep it for backward compat
+                document.body.classList.add('light-theme');
+            } else {
+                document.body.setAttribute('data-theme', name);
+            }
+            // Persist + sync the active marker in the picker
+            try { localStorage.setItem('jarvis-theme', name); } catch(e) {}
+            document.querySelectorAll('.theme-pick').forEach(b => {
+                b.classList.toggle('active', b.dataset.theme === name);
+            });
+        }
+
+        function setTheme(name, ev) {
+            if (ev) ev.stopPropagation();
+            applyTheme(name);
+            // Auto-close the picker on selection
+            const picker = document.getElementById('theme-picker');
+            if (picker) picker.classList.remove('open');
+        }
+
+        function toggleTheme(ev) {
+            if (ev) ev.stopPropagation();
+            const picker = document.getElementById('theme-picker');
+            if (!picker) return;
+            // If already open, close it. Otherwise open + show current selection.
+            const willOpen = !picker.classList.contains('open');
+            picker.classList.toggle('open', willOpen);
+            if (willOpen) {
+                // Sync the active marker in case the user just changed theme
+                const current = (() => {
+                    if (document.body.classList.contains('light-theme')) return 'light';
+                    return document.body.getAttribute('data-theme') || 'midnight';
+                })();
+                document.querySelectorAll('.theme-pick').forEach(b => {
+                    b.classList.toggle('active', b.dataset.theme === current);
+                });
             }
         }
+        // Close the picker when clicking anywhere else
+        document.addEventListener('click', function(e) {
+            const picker = document.getElementById('theme-picker');
+            if (!picker || !picker.classList.contains('open')) return;
+            if (e.target.closest('.theme-picker') || e.target.closest('.theme-toggle')) return;
+            picker.classList.remove('open');
+        });
 
         function toggleVoiceMode() {
             const toggle = document.getElementById('voice-toggle');
@@ -1892,6 +2304,23 @@ function initBridge() {
             if (bar) bar.innerText = 'MEM: ' + used + ' / ' + total;
         }
 
+        // Uptime counter — starts when the bridge comes online.
+        (function() {
+            const el = document.getElementById('uptime-indicator');
+            if (!el) return;
+            const start = Date.now();
+            function tick() {
+                const ms = Date.now() - start;
+                const s = Math.floor(ms / 1000) % 60;
+                const m = Math.floor(ms / 60000) % 60;
+                const h = Math.floor(ms / 3600000);
+                const pad = (n) => String(n).padStart(2, '0');
+                el.innerText = 'UPTIME: ' + pad(h) + ':' + pad(m) + ':' + pad(s);
+            }
+            tick();
+            setInterval(tick, 1000);
+        })();
+
         // Restore theme preference
         document.addEventListener('DOMContentLoaded', function() {
             let savedTheme = null;
@@ -1900,7 +2329,11 @@ function initBridge() {
             } catch(e) {
                 // localStorage is disabled in data: URLs (QWebEngineView setHtml)
             }
-            if (savedTheme === 'light') document.body.classList.add('light-theme');
+            if (savedTheme && savedTheme !== 'midnight' && THEMES.indexOf(savedTheme) !== -1) {
+                applyTheme(savedTheme);
+            } else {
+                applyTheme('midnight');
+            }
             initBridge();
         });
 
@@ -2373,29 +2806,211 @@ function initBridge() {
             }
         }
 
-        // Command history: Up/Down arrow navigation
+        // Command history: Up/Down arrow navigation + global keyboard shortcuts.
+        // Shortcuts (see #help-overlay for the same list):
+        //   Enter / Shift+Enter  - send / newline in input
+        //   Up / Down            - command history (when input is focused)
+        //   V                    - toggle voice mode
+        //   M                    - toggle microphone
+        //   F11                  - toggle fullscreen
+        //   ?                    - toggle help overlay
+        //   Esc                  - close help overlay / blur input
+        //   /  or  Ctrl+K        - focus command input
+        //   Ctrl+L               - clear conversation log
+        const _isTypingInField = () => {
+            const el = document.activeElement;
+            if (!el) return false;
+            const tag = (el.tagName || '').toUpperCase();
+            return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+        };
         document.addEventListener('keydown', function(e) {
+            // Input-scoped shortcuts first
             const input = document.getElementById('cmd-input');
-            if (!input || document.activeElement !== input) return;
-            if (e.key === 'ArrowUp') {
-                e.preventDefault();
-                if (cmdIndex > 0) {
-                    cmdIndex--;
-                    input.value = cmdHistory[cmdIndex] || '';
+            if (input && document.activeElement === input) {
+                if (e.key === 'ArrowUp') {
+                    e.preventDefault();
+                    if (cmdIndex > 0) {
+                        cmdIndex--;
+                        input.value = cmdHistory[cmdIndex] || '';
+                    }
+                } else if (e.key === 'ArrowDown') {
+                    e.preventDefault();
+                    if (cmdIndex < cmdHistory.length - 1) {
+                        cmdIndex++;
+                        input.value = cmdHistory[cmdIndex] || '';
+                    } else {
+                        cmdIndex = cmdHistory.length;
+                        input.value = '';
+                    }
+                } else if (e.key === 'Escape') {
+                    e.preventDefault();
+                    input.blur();
+                } else if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+                    e.preventDefault();
+                    sendCmd();
                 }
-            } else if (e.key === 'ArrowDown') {
+                return;
+            }
+            // Global shortcuts (skip if user is typing in any other field)
+            if (_isTypingInField()) return;
+            const k = e.key.toLowerCase();
+            if (e.key === 'F11') {
                 e.preventDefault();
-                if (cmdIndex < cmdHistory.length - 1) {
-                    cmdIndex++;
-                    input.value = cmdHistory[cmdIndex] || '';
-                } else {
-                    cmdIndex = cmdHistory.length;
-                    input.value = '';
+                toggleFullscreen();
+            } else if (k === '?' || (e.shiftKey && k === '/')) {
+                e.preventDefault();
+                toggleHelp();
+            } else if (k === 'v' && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                toggleVoiceMode();
+            } else if (k === 'm' && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                toggleMic();
+            } else if (k === 'escape') {
+                // Close help overlay if open
+                const help = document.getElementById('help-overlay');
+                if (help && help.classList.contains('open')) {
+                    e.preventDefault();
+                    toggleHelp();
                 }
-            } else if (e.key === 'Escape') {
-                input.blur();
+            } else if (e.key === '/' && !e.ctrlKey && !e.metaKey) {
+                e.preventDefault();
+                if (input) { input.focus(); input.select(); }
+            } else if ((e.ctrlKey || e.metaKey) && k === 'k') {
+                e.preventDefault();
+                if (input) { input.focus(); input.select(); }
+            } else if ((e.ctrlKey || e.metaKey) && k === 'l') {
+                e.preventDefault();
+                clearLog();
             }
         });
+
+        // ============================================
+        // HELP OVERLAY + FULLSCREEN + VOICE ORBIT
+        // ============================================
+        function toggleHelp() {
+            const el = document.getElementById('help-overlay');
+            if (el) el.classList.toggle('open');
+        }
+        function toggleFullscreen() {
+            // Drive the Qt host window through the bridge (the browser's
+            // requestFullscreen() silently fails inside QWebEngineView on
+            // most platforms). Falls back to a CSS class so the page still
+            // feels fullscreen if the bridge call is somehow blocked.
+            try {
+                if (window.pyBridge && window.pyBridge.toggleFullscreen) {
+                    window.pyBridge.toggleFullscreen();
+                    return;
+                }
+            } catch (e) { /* fall through to API */ }
+            try {
+                if (!document.fullscreenElement) {
+                    const root = document.documentElement;
+                    if (root.requestFullscreen) root.requestFullscreen();
+                    else if (root.webkitRequestFullscreen) root.webkitRequestFullscreen();
+                } else {
+                    if (document.exitFullscreen) document.exitFullscreen();
+                    else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+                }
+            } catch(e) {
+                document.body.classList.toggle('fullscreen');
+            }
+        }
+        // React to the OS / F11 leaving fullscreen so the Esc key works
+        // even when the user used the F11 menu rather than our toggle.
+        document.addEventListener('fullscreenchange', () => {
+            document.body.classList.toggle('fullscreen', !!document.fullscreenElement);
+        });
+
+        // ============================================
+        // VOICE-ORBIT — animated radial wave around the reactor that
+        // pulses with the mic input level, similar to Cortana/Siri.
+        // Replaces the static `voice-orbit` placeholder with real motion.
+        // ============================================
+        (function() {
+            const cv = document.getElementById('voice-orbit');
+            if (!cv) return;
+            const ctx = cv.getContext('2d');
+            // Match canvas to its CSS box for crispness
+            function resize() {
+                const wrap = cv.parentElement;
+                if (!wrap) return;
+                cv.width  = wrap.clientWidth;
+                cv.height = wrap.clientHeight;
+            }
+            resize();
+            window.addEventListener('resize', resize);
+            let t = 0;
+            function draw() {
+                t += 0.018;
+                const w = cv.width, h = cv.height;
+                const cx = w / 2, cy = h / 2;
+                ctx.clearRect(0, 0, w, h);
+                const amp = Math.max(_audioLevel, _audioDecay || 0);
+                const baseR = Math.min(w, h) * 0.34;
+                // 3 concentric pulsing rings
+                for (let i = 0; i < 3; i++) {
+                    const phase = (t + i * 0.6) % 6;
+                    const r = baseR + phase * 8 + amp * 30;
+                    const opacity = Math.max(0, 0.5 - phase / 6) * (0.4 + amp * 0.6);
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+                    ctx.strokeStyle = `rgba(0, 212, 255, ${opacity.toFixed(3)})`;
+                    ctx.lineWidth = 1.2;
+                    ctx.stroke();
+                }
+                requestAnimationFrame(draw);
+            }
+            draw();
+        })();
+
+        // ============================================
+        // AUDIO ORB (the soft halo that throbs behind the reactor when
+        // the mic is open) — toggled by .active class.
+        // ============================================
+        (function() {
+            const wrap = document.getElementById('reactor-wrap');
+            if (!wrap) return;
+            // Insert the orb element once
+            const orb = document.createElement('div');
+            orb.className = 'audio-orb';
+            orb.id = 'audio-orb';
+            wrap.appendChild(orb);
+        })();
+        // Mirror the existing micOn flag to the orb's .active class
+        const _origToggleMic = toggleMic;
+        toggleMic = function() {
+            _origToggleMic();
+            const orb = document.getElementById('audio-orb');
+            if (orb) orb.classList.toggle('active', !!micOn);
+        };
+        // Voice-mode visual sync: when voice is on, the orb idles slowly
+        const _origToggleVoice = toggleVoice;
+        toggleVoice = function(checked) {
+            _origToggleVoice(checked);
+            const orb = document.getElementById('audio-orb');
+            if (orb && checked && !micOn) orb.classList.add('active');
+            else if (orb && !checked) orb.classList.remove('active');
+        };
+
+        // ============================================
+        // SCROLL-TO-BOTTOM PILL — only visible when the user has
+        // scrolled the log away from the bottom. Clicking it resumes
+        // auto-follow.
+        // ============================================
+        (function() {
+            const log = document.getElementById('log-area');
+            if (!log) return;
+            log.addEventListener('scroll', () => {
+                const nearBottom = log.scrollTop + log.clientHeight >= log.scrollHeight - 20;
+                const overflows  = log.scrollHeight > log.clientHeight;
+                if (!nearBottom && overflows) userScrolled = true;
+                else if (nearBottom) userScrolled = false;
+                // Hide the existing legacy pill
+                const legacy = document.getElementById('log-scroll-ok');
+                if (legacy) legacy.style.display = 'none';
+            }, { passive: true });
+        })();
     </script>
 </head>
 <body>
@@ -2435,13 +3050,36 @@ function initBridge() {
         </div>
     </div>
 
-    <button class="theme-toggle" onclick="toggleTheme()" title="Toggle light/dark theme">THEME</button>
+    <button class="theme-toggle" onclick="toggleTheme(event)" data-tip="Choose theme">THEME</button>
+
+    <div class="theme-picker" id="theme-picker">
+        <button class="theme-pick" data-theme="midnight" onclick="setTheme('midnight', event)">
+            <span class="theme-swatch" style="background:#00d4ff; color:#00d4ff;"></span>Midnight
+        </button>
+        <button class="theme-pick" data-theme="stark" onclick="setTheme('stark', event)">
+            <span class="theme-swatch" style="background:#f0b400; color:#f0b400;"></span>Stark
+        </button>
+        <button class="theme-pick" data-theme="forest" onclick="setTheme('forest', event)">
+            <span class="theme-swatch" style="background:#2ed573; color:#2ed573;"></span>Forest
+        </button>
+        <button class="theme-pick" data-theme="crimson" onclick="setTheme('crimson', event)">
+            <span class="theme-swatch" style="background:#ff3b3b; color:#ff3b3b;"></span>Crimson
+        </button>
+        <button class="theme-pick" data-theme="purple" onclick="setTheme('purple', event)">
+            <span class="theme-swatch" style="background:#c084fc; color:#c084fc;"></span>Vision
+        </button>
+        <button class="theme-pick" data-theme="light" onclick="setTheme('light', event)">
+            <span class="theme-swatch" style="background:#1a202c; color:#1a202c;"></span>Light
+        </button>
+    </div>
 
     <div class="quick-actions">
-        <button class="quick-btn" onclick="safeBridgeCall('requestImagePick')" title="Upload image">📷</button>
-        <button class="quick-btn" onclick="safeBridgeCall('triggerReconnect')" title="Reconnect">🔄</button>
-        <button class="quick-btn" onclick="toggleVoiceMode()" title="Toggle voice">🎤</button>
-        <button class="quick-btn" onclick="showBookmarks()" title="Bookmarks">🔖</button>
+        <button class="quick-btn" data-tip="Attach image" onclick="safeBridgeCall('requestImagePick')">📷</button>
+        <button class="quick-btn" data-tip="Reconnect core" onclick="safeBridgeCall('triggerReconnect')">🔄</button>
+        <button class="quick-btn" data-tip="Toggle voice" onclick="toggleVoiceMode()">🎤</button>
+        <button class="quick-btn" data-tip="Bookmarks" onclick="showBookmarks()">🔖</button>
+        <button class="quick-btn" data-tip="Help  (?)" onclick="toggleHelp()">❔</button>
+        <button class="quick-btn" data-tip="Toggle fullscreen  (F11)" onclick="toggleFullscreen()">⛶</button>
     </div>
 
     <div class="conn-indicator" id="conn-indicator">
@@ -2450,6 +3088,7 @@ function initBridge() {
     </div>
 
     <div class="mem-bar" id="mem-bar-indicator">MEM: --</div>
+    <div id="uptime-indicator">UPTIME: 00:00:00</div>
 
     <canvas id="particle-bg"></canvas>
     <div id="boot-overlay">
@@ -2510,7 +3149,8 @@ function initBridge() {
             <div class="focus-box" id="focus-win">System Idle</div>
         </div>
         <div class="hud-panel" id="center-panel">
-            <div class="reactor-wrap">
+            <div class="reactor-wrap" id="reactor-wrap" data-state="offline">
+                <div class="voice-orbit"><canvas id="voice-orbit" width="600" height="600"></canvas></div>
                 <svg class="reactor-svg" viewBox="0 0 300 300">
                     <defs>
                         <!-- Core radial gradient — white center fading to cyan -->
@@ -2654,7 +3294,6 @@ function initBridge() {
     <footer>
         <div class="input-row">
             <input type="text" id="cmd-input" placeholder="Awaiting command, Sir..." autocomplete="off"
-                onkeydown="if(event.key==='Enter' && !event.isComposing){sendCmd();return false;}"
                 onfocus="userScrolled=false;"
                 oninput="if(userScrolled){const log=document.getElementById('log-area'); if(log && log.scrollTop + log.clientHeight >= log.scrollHeight - 20){userScrolled=false;}}">
             <button class="exec-btn" onclick="sendCmd()">EXECUTE</button>
@@ -2692,19 +3331,19 @@ function initBridge() {
                 <span class="ctrl-label">Vol</span>
                 <input type="range" id="vol-slider" min="0" max="2" step="0.1" value="1" onchange="changeVolume(this.value)" title="Volume">
             </div>
-            <button id="mic-btn" class="hud-btn mic-btn-inactive" onclick="toggleMic()" disabled>
+            <button id="mic-btn" class="hud-btn mic-btn-inactive" onclick="toggleMic()" data-tip="Microphone  (M)" disabled>
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v1a7 7 0 0 1-14 0v-1M12 19v4M8 23h8"/></svg>
                 <span>MIC</span>
             </button>
-            <button class="hud-btn" onclick="reconnectCore()">
+            <button class="hud-btn" data-tip="Re-link core" onclick="reconnectCore()">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
                 RE-LINK
             </button>
-            <button class="hud-btn" onclick="resetCore()">
+            <button class="hud-btn" data-tip="Reset conversation" onclick="resetCore()">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
                 RESET
             </button>
-            <button class="hud-btn" onclick="clearLog()">
+            <button class="hud-btn" data-tip="Clear chat" onclick="clearLog()">
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
                 PURGE
             </button>
@@ -2719,6 +3358,59 @@ function initBridge() {
             <div class="approval-btns">
                 <button class="btn-deny" onclick="sendApproval(false)">DENY</button>
                 <button class="btn-auth" onclick="sendApproval(true)">AUTHORIZE</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Help / Shortcut overlay. Press `?` or click the ❔ button. -->
+    <div id="help-overlay" role="dialog" aria-label="Keyboard shortcuts">
+        <div class="help-card">
+            <button class="help-close" onclick="toggleHelp()" aria-label="Close">×</button>
+            <h2>J.A.R.V.I.S. CONTROL DECK</h2>
+            <div class="help-sub">KEYBOARD SHORTCUTS // MARK XLV</div>
+            <div class="help-row">
+                <span class="help-label">Send command</span>
+                <span class="help-keys"><span class="kbd">Enter</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">New line (multi-line input)</span>
+                <span class="help-keys"><span class="kbd">Shift</span> + <span class="kbd">Enter</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Command history (up/down)</span>
+                <span class="help-keys"><span class="kbd">↑</span> <span class="kbd">↓</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Toggle voice mode</span>
+                <span class="help-keys"><span class="kbd">V</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Toggle microphone</span>
+                <span class="help-keys"><span class="kbd">M</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Toggle fullscreen</span>
+                <span class="help-keys"><span class="kbd">F11</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Focus command input</span>
+                <span class="help-keys"><span class="kbd">/</span> or <span class="kbd">Ctrl</span> + <span class="kbd">K</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Clear conversation log</span>
+                <span class="help-keys"><span class="kbd">Ctrl</span> + <span class="kbd">L</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Change theme</span>
+                <span class="help-keys"><span class="kbd">THEME</span> button (6 presets)</span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Toggle this panel</span>
+                <span class="help-keys"><span class="kbd">?</span></span>
+            </div>
+            <div class="help-row">
+                <span class="help-label">Close any overlay / panel</span>
+                <span class="help-keys"><span class="kbd">Esc</span></span>
             </div>
         </div>
     </div>
@@ -2782,6 +3474,15 @@ class AudioPlayer:
             kwargs = {"samplerate": AUDIO_SR_OUT, "channels": 1, "dtype": "int16", "callback": callback}
             if self._device is not None:
                 kwargs["device"] = self._device
+            # Reset queue and buffer so stale audio from the previous device
+            # (e.g. when the user just switched output) doesn't bleed through.
+            with self._lock:
+                self._buffer = b''
+                try:
+                    while True:
+                        self._queue.get_nowait()
+                except queue.Empty:
+                    pass
             self._stream = sd.RawOutputStream(**kwargs)
             self._stream.start()
             self._active = True
@@ -2849,6 +3550,9 @@ class AudioRecorder:
             kwargs = {"samplerate": AUDIO_SR_IN, "channels": 1, "dtype": "int16", "callback": callback}
             if self._device is not None:
                 kwargs["device"] = self._device
+            # Drop any half-accumulated buffer from a prior device so we
+            # don't splice input from two microphones into the same chunk.
+            self._accumulator = bytearray()
             self._stream = sd.RawInputStream(**kwargs)
             self._stream.start()
             self._active = True
@@ -3018,6 +3722,9 @@ class PyBridge(QObject):
     def onBridgeReady(self):
         try:
             self.window.ui_ready = True
+            # Always dismiss the boot overlay once we hear from JS, even if
+            # subsequent steps fail — otherwise the user sees a stuck boot
+            # screen with no way to recover.
             self.logReceived.emit("JARVIS", "Neural matrix online. All systems nominal. Awaiting your command, Sir.")
             self.telemetryUpdated.emit(0, 0, 0, "0.0 B/s", "0.0 B/s", "System Idle")
             # Push config and audio devices to UI
@@ -3032,7 +3739,7 @@ class PyBridge(QObject):
             self.window.start_core()
         except Exception as e:
             logger.error(f"Bridge ready error: {e}")
-            self.logReceived.emit("SYSTEM", f"Bridge initialization warning: {e}")
+            self.logReceived.emit("SYSTEM", f"Bridge init error: {e}")
 
     @pyqtSlot(str)
     def setVoiceModeEnabled(self, enabled_str):
@@ -3107,6 +3814,27 @@ class PyBridge(QObject):
     def exportChat(self, path: str):
         if self.window.core:
             self.window.core.export_chat(path)
+
+    @pyqtSlot()
+    def toggleFullscreen(self):
+        """Toggle the Qt window between fullscreen and normal. The browser
+        Fullscreen API is unreliable inside QWebEngineView (it silently
+        fails on most platforms), so we drive the host window directly.
+        We also toggle body.fullscreen so the in-page CSS reacts."""
+        try:
+            w = self.window
+            if w.isFullScreen():
+                w.showNormal()
+            else:
+                w.showFullScreen()
+            # Mirror to body class so CSS-only responsive rules apply too
+            self.window.view.page().runJavaScript(
+                "document.body.classList.toggle('fullscreen', "
+                + ("true" if w.isFullScreen() else "false")
+                + ");"
+            )
+        except Exception as e:
+            logger.warning(f"Fullscreen toggle failed: {e}")
 
     @pyqtSlot()
     def showBookmarks(self):
@@ -6166,6 +6894,11 @@ class JarvisMainWindow(QMainWindow):
         if self.config.get("startup_minimized"):
             QTimer.singleShot(500, self.hide)
 
+        # Boot-overlay safety net: if the QWebChannel never finishes
+        # initialising (port blocked, JS error, etc.) the boot screen
+        # would block the UI forever. After 5 s, force-close it.
+        QTimer.singleShot(5000, self._force_boot_done)
+
     # ------------------------------------------------------------------
     # Frameless-window mouse handling (PROPER overlay implementation)
     # ------------------------------------------------------------------
@@ -6479,6 +7212,31 @@ class JarvisMainWindow(QMainWindow):
     def _update_stats(self, cpu, mem_pct, disk_pct, net_in, net_out, win_title):
         if self.ui_ready and self.core:
             self.bridge.telemetryUpdated.emit(cpu, mem_pct, disk_pct, net_in, net_out, win_title)
+
+    def _force_boot_done(self):
+        """Safety net: if JS never called onBridgeReady, force the boot
+        overlay closed and warn the user. The page is interactive but the
+        Python bridge isn't, so JARVIS itself won't reply — but the user
+        can still drag, resize, theme-toggle, open help, etc."""
+        if getattr(self, 'ui_ready', False):
+            return
+        try:
+            self.view.page().runJavaScript(
+                "(function(){var o=document.getElementById('boot-overlay');"
+                "if(o)o.classList.add('fade-out');})();"
+            )
+        except Exception:
+            pass
+        # Best-effort warning to chat once the bridge is up
+        try:
+            if hasattr(self, 'bridge') and self.bridge:
+                self.bridge.logReceived.emit(
+                    "SYSTEM",
+                    "Web channel failed to initialise. JARVIS core is offline. "
+                    "Use \u201cRe-link\u201d in the corner to retry."
+                )
+        except Exception:
+            pass
 
     def set_mic_active(self, active):
         if self.core:
