@@ -71,6 +71,12 @@ except ImportError:
     HAS_QRCODE = False
 
 try:
+    import ntplib
+    HAS_NTPLIB = True
+except ImportError:
+    HAS_NTPLIB = False
+
+try:
     import requests
     HAS_REQUESTS = True
 except ImportError:
@@ -725,6 +731,63 @@ JARVIS_TOOLS = [
         description="Show detailed connection status: latency, packet loss, session health.",
         parameters=types.Schema(type="OBJECT", properties={})
     ),
+    # ----- Advanced System Tools -----
+    types.FunctionDeclaration(
+        name="get_battery_info",
+        description="Get detailed battery status: charge level, charging state, time remaining.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_cpu_temperature",
+        description="Get CPU temperature readings from sensor hardware if available.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_system_uptime",
+        description="Get system uptime since last boot with boot timestamp.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_disk_details",
+        description="Get detailed disk usage for all mounted partitions: size, used, free, filesystem type.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_network_info",
+        description="Get all network interfaces, IP addresses, MAC addresses, and connection status.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_gps_clock",
+        description="Get precise UTC time via NTP (GPS-equivalent) with offset/stratum. Falls back to local clock.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="get_top_apps",
+        description="Get top processes sorted by CPU and memory usage. Filter with name.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "count": types.Schema(type="INTEGER", description="Max processes to return. Default: 10.")
+            }
+        )
+    ),
+    types.FunctionDeclaration(
+        name="lock_screen",
+        description="Lock the workstation screen. Cross-platform.",
+        parameters=types.Schema(type="OBJECT", properties={})
+    ),
+    types.FunctionDeclaration(
+        name="kill_process",
+        description="Kill a running process by name or PID. Requires appropriate permissions.",
+        parameters=types.Schema(
+            type="OBJECT",
+            properties={
+                "name": types.Schema(type="STRING", description="Process name to kill (e.g. 'chrome', 'notepad').")
+            },
+            required=["name"]
+        )
+    ),
 ]
 
 # ==========================================
@@ -1228,6 +1291,231 @@ UI_HTML = """
             border-color: rgba(0, 212, 255, 0.2);
             box-shadow: 0 0 20px rgba(0, 212, 255, 0.05);
         }
+
+        /* Animated holographic shimmer on header */
+        .logo-block h1 {
+            position: relative;
+        }
+        .logo-block h1::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: -100%;
+            width: 60%;
+            height: 100%;
+            background: linear-gradient(90deg, transparent, rgba(0,212,255,0.08), transparent);
+            animation: holographic-shimmer 4s ease-in-out infinite;
+        }
+        @keyframes holographic-shimmer {
+            0%, 100% { left: -100%; opacity: 0; }
+            50% { left: 150%; opacity: 1; }
+        }
+
+        /* Particle background canvas */
+        #particle-bg {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 0;
+            pointer-events: none;
+            opacity: 0.4;
+        }
+
+        /* Pulse ring on status dot change */
+        .status-dot.pulse::before {
+            content: '';
+            position: absolute;
+            inset: -4px;
+            border-radius: 50%;
+            border: 1px solid currentColor;
+            animation: ring-pulse-out 0.8s ease-out forwards;
+            pointer-events: none;
+        }
+        @keyframes ring-pulse-out {
+            0% { transform: scale(1); opacity: 0.8; }
+            100% { transform: scale(3); opacity: 0; }
+        }
+
+        /* Quick suggestions bar */
+        .suggestions-bar {
+            position: fixed;
+            bottom: 90px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            gap: 8px;
+            z-index: 50;
+            flex-wrap: wrap;
+            justify-content: center;
+            max-width: 70%;
+        }
+        .suggestion-chip {
+            background: rgba(0, 212, 255, 0.06);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            color: var(--text-dim);
+            padding: 5px 14px;
+            border-radius: 14px;
+            font-family: var(--font-display);
+            font-size: 9px;
+            letter-spacing: 1px;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            backdrop-filter: blur(6px);
+            white-space: nowrap;
+        }
+        .suggestion-chip:hover {
+            background: rgba(0, 212, 255, 0.15);
+            border-color: var(--jarvis-cyan);
+            color: var(--jarvis-cyan);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(0, 212, 255, 0.15);
+        }
+
+        /* Keyboard shortcut overlay */
+        .kbd {
+            display: inline-block;
+            background: rgba(0, 212, 255, 0.08);
+            border: 1px solid rgba(0, 212, 255, 0.2);
+            border-radius: 4px;
+            padding: 1px 6px;
+            font-family: var(--font-mono);
+            font-size: 10px;
+            color: var(--jarvis-cyan);
+            margin: 0 2px;
+        }
+
+        /* Circular audio visualizer (around reactor) */
+        .audio-ring-container {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            pointer-events: none;
+        }
+        .audio-ring-container svg {
+            filter: drop-shadow(0 0 8px rgba(0, 212, 255, 0.3));
+        }
+        .reactive-ring {
+            fill: none;
+            stroke: rgba(0, 212, 255, 0.25);
+            stroke-width: 1.5;
+            stroke-dasharray: 8 4;
+            transition: stroke 0.4s;
+        }
+
+        /* Improved message animations */
+        .msg {
+            animation: msg-in 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+        }
+        @keyframes msg-in {
+            from { opacity: 0; transform: translateY(8px) scale(0.98); }
+            to { opacity: 1; transform: translateY(0) scale(1); }
+        }
+
+        /* System message with scan-line effect */
+        .msg-system {
+            background: rgba(0, 212, 255, 0.03);
+            border-left: 2px solid rgba(255, 77, 77, 0.3);
+            border-top: 1px solid rgba(255, 77, 77, 0.05);
+            border-bottom: 1px solid rgba(255, 77, 77, 0.05);
+        }
+
+        /* Scrollbar with glow */
+        #log-area::-webkit-scrollbar { width: 5px; }
+        #log-area::-webkit-scrollbar-track { background: rgba(0, 212, 255, 0.02); border-radius: 4px; }
+        #log-area::-webkit-scrollbar-thumb {
+            background: linear-gradient(180deg, rgba(0,212,255,0.3), rgba(0,212,255,0.1));
+            border-radius: 4px;
+        }
+        #log-area::-webkit-scrollbar-thumb:hover {
+            background: linear-gradient(180deg, rgba(0,212,255,0.5), rgba(0,212,255,0.3));
+        }
+
+        /* Tool call result cards */
+        .msg-body .tool-result {
+            background: rgba(2, 8, 18, 0.6);
+            border: 1px solid rgba(0, 212, 255, 0.12);
+            border-radius: 8px;
+            padding: 10px 14px;
+            margin: 6px 0;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-dim);
+            white-space: pre-wrap;
+            word-break: break-word;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .msg-body .tool-result .tool-label {
+            color: var(--jarvis-cyan);
+            font-family: var(--font-display);
+            font-size: 9px;
+            letter-spacing: 2px;
+            margin-bottom: 6px;
+            text-transform: uppercase;
+            opacity: 0.7;
+        }
+
+        /* Command palette suggestion styling */
+        .msg-body ul.cmd-suggestions {
+            list-style: none;
+            padding: 0;
+            margin: 8px 0;
+        }
+        .msg-body ul.cmd-suggestions li {
+            padding: 6px 10px;
+            margin: 3px 0;
+            background: rgba(0, 212, 255, 0.04);
+            border: 1px solid rgba(0, 212, 255, 0.1);
+            border-radius: 6px;
+            font-family: var(--font-mono);
+            font-size: 11px;
+            color: var(--text-dim);
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .msg-body ul.cmd-suggestions li:hover {
+            background: rgba(0, 212, 255, 0.1);
+            border-color: rgba(0, 212, 255, 0.3);
+            color: var(--jarvis-cyan);
+        }
+
+        /* Light theme overrides */
+        body.light-theme {
+            --jarvis-dark: #f0f4f8;
+            --jarvis-panel: rgba(255, 255, 255, 0.85);
+            --jarvis-border: rgba(0, 100, 180, 0.15);
+            --text-primary: #1a202c;
+            --text-dim: #4a5568;
+        }
+        body.light-theme {
+            background-color: #f0f4f8;
+            background-image:
+                radial-gradient(ellipse at 50% 50%, rgba(0, 100, 180, 0.05) 0%, transparent 70%),
+                linear-gradient(rgba(0, 100, 180, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 100, 180, 0.03) 1px, transparent 1px);
+        }
+        body.light-theme .reactor-wrap svg circle { filter: brightness(0.7); }
+        body.light-theme #title-bar {
+            background: linear-gradient(180deg, rgba(240,244,248,0.95), rgba(220,230,240,0.95));
+        }
+        body.light-theme footer {
+            background: rgba(240,244,248,0.95);
+        }
+        body.light-theme header {
+            background: rgba(240,244,248,0.9);
+            border-bottom-color: rgba(0,100,180,0.12);
+        }
+        body.light-theme .msg-body pre {
+            background: rgba(240,244,248,0.9);
+            border-color: rgba(0,100,180,0.15);
+        }
+        body.light-theme .msg-body code {
+            background: rgba(0,100,180,0.08);
+            border-color: rgba(0,100,180,0.15);
+        }
         /* UX: Input placeholder shimmer */
         #cmd-input::placeholder {
             color: var(--text-dim);
@@ -1617,6 +1905,202 @@ function initBridge() {
         });
 
         // ============================================
+        // PARTICLE BACKGROUND
+        // ============================================
+        (function() {
+            const cv = document.getElementById('particle-bg');
+            if (!cv) return;
+            const ctx = cv.getContext('2d');
+            let particles = [];
+            const PARTICLE_COUNT = 60;
+            const CONNECT_DIST = 130;
+
+            function resize() {
+                cv.width = window.innerWidth;
+                cv.height = window.innerHeight;
+            }
+            resize();
+            window.addEventListener('resize', resize);
+
+            class Particle {
+                constructor() { this.reset(); }
+                reset() {
+                    this.x = Math.random() * cv.width;
+                    this.y = Math.random() * cv.height;
+                    this.vx = (Math.random() - 0.5) * 0.35;
+                    this.vy = (Math.random() - 0.5) * 0.35;
+                    this.r = Math.random() * 1.5 + 0.5;
+                    this.alpha = Math.random() * 0.5 + 0.2;
+                }
+                update() {
+                    this.x += this.vx;
+                    this.y += this.vy;
+                    if (this.x < -20) this.x = cv.width + 20;
+                    if (this.x > cv.width + 20) this.x = -20;
+                    if (this.y < -20) this.y = cv.height + 20;
+                    if (this.y > cv.height + 20) this.y = -20;
+                }
+                draw() {
+                    ctx.beginPath();
+                    ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+                    ctx.fillStyle = `rgba(0, 212, 255, ${this.alpha})`;
+                    ctx.fill();
+                }
+            }
+
+            for (let i = 0; i < PARTICLE_COUNT; i++) particles.push(new Particle());
+
+            function animate() {
+                ctx.clearRect(0, 0, cv.width, cv.height);
+                particles.forEach(p => { p.update(); p.draw(); });
+                // Draw connections
+                for (let i = 0; i < particles.length; i++) {
+                    for (let j = i + 1; j < particles.length; j++) {
+                        const dx = particles[i].x - particles[j].x;
+                        const dy = particles[i].y - particles[j].y;
+                        const dist = Math.sqrt(dx * dx + dy * dy);
+                        if (dist < CONNECT_DIST) {
+                            ctx.beginPath();
+                            ctx.moveTo(particles[i].x, particles[i].y);
+                            ctx.lineTo(particles[j].x, particles[j].y);
+                            const alpha = (1 - dist / CONNECT_DIST) * 0.12;
+                            ctx.strokeStyle = `rgba(0, 212, 255, ${alpha})`;
+                            ctx.lineWidth = 0.5;
+                            ctx.stroke();
+                        }
+                    }
+                }
+                requestAnimationFrame(animate);
+            }
+            animate();
+        })();
+
+        // ============================================
+        // QUICK SUGGESTIONS BAR
+        // ============================================
+        const DEFAULT_SUGGESTIONS = [
+            { text: "System Status", action: () => "What is my system status?" },
+            { text: "Weather", action: () => "What is the weather?" },
+            { text: "Battery", action: () => "Check my battery status" },
+            { text: "Top Apps", action: () => "Show me my top running applications" },
+            { text: "Clean Up", action: () => "Clean up temporary files" },
+            { text: "Network", action: () => "Show my network information" },
+            { text: "Uptime", action: () => "How long has my system been running?" },
+            { text: "Screenshot", action: () => "Take a screenshot" },
+        ];
+
+        function showSuggestions() {
+            const bar = document.getElementById('suggestions-bar');
+            if (!bar) return;
+            const input = document.getElementById('cmd-input');
+            if (input && input.value.trim()) { bar.style.display = 'none'; return; }
+            if (!window._bridgeReady) { bar.style.display = 'none'; return; }
+
+            bar.innerHTML = '';
+            DEFAULT_SUGGESTIONS.forEach(s => {
+                const chip = document.createElement('button');
+                chip.className = 'suggestion-chip';
+                chip.textContent = s.text;
+                chip.onclick = () => {
+                    const cmd = s.action();
+                    if (input) { input.value = cmd; sendCmd(); }
+                };
+                bar.appendChild(chip);
+            });
+            bar.style.display = 'flex';
+        }
+
+        function hideSuggestions() {
+            const bar = document.getElementById('suggestions-bar');
+            if (bar) bar.style.display = 'none';
+        }
+
+        document.addEventListener('DOMContentLoaded', function() {
+            const input = document.getElementById('cmd-input');
+            if (input) {
+                input.addEventListener('focus', () => setTimeout(showSuggestions, 300));
+                input.addEventListener('blur', () => setTimeout(hideSuggestions, 200));
+                input.addEventListener('input', () => {
+                    if (input.value.trim()) hideSuggestions();
+                });
+            }
+        });
+
+        // ============================================
+        // REACTOR REACTIVE RING (audio + state)
+        // ============================================
+        let _reactorAudioLevel = 0;
+        let _reactorDecay = 0;
+        function updateReactorAudioRing(level) {
+            _reactorAudioLevel = Math.max(0, Math.min(1, level || 0));
+        }
+        (function() {
+            const reactorWrap = document.querySelector('.reactor-wrap');
+            if (!reactorWrap) return;
+            const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+            svg.setAttribute('width', '340');
+            svg.setAttribute('height', '340');
+            svg.style.cssText = 'position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);pointer-events:none;';
+            const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+            circle.setAttribute('cx', '170');
+            circle.setAttribute('cy', '170');
+            circle.setAttribute('r', '155');
+            circle.setAttribute('fill', 'none');
+            circle.setAttribute('stroke', 'rgba(0,212,255,0.2)');
+            circle.setAttribute('stroke-width', '1');
+            circle.classList.add('reactive-ring');
+            const defs = document.createElementNS('http://www.w3.org/2000/svg', 'defs');
+            const filter = document.createElementNS('http://www.w3.org/2000/svg', 'filter');
+            filter.setAttribute('id', 'ringGlow');
+            const blur = document.createElementNS('http://www.w3.org/2000/svg', 'feGaussianBlur');
+            blur.setAttribute('stdDeviation', '2');
+            blur.setAttribute('result', 'blur');
+            filter.appendChild(blur);
+            const merge = document.createElementNS('http://www.w3.org/2000/svg', 'feMerge');
+            const mn1 = document.createElementNS('http://www.w3.org/2000/svg', 'feMergeNode');
+            mn1.setAttribute('in', 'blur');
+            const mn2 = document.createElementNS('http://www.w3.org/2000/svg', 'feMergeNode');
+            mn2.setAttribute('in', 'SourceGraphic');
+            merge.appendChild(mn1);
+            merge.appendChild(mn2);
+            filter.appendChild(merge);
+            defs.appendChild(filter);
+            svg.appendChild(defs);
+            svg.appendChild(circle);
+            reactorWrap.appendChild(svg);
+
+            const levelMap = {THINKING: '#ffb703', SPEAKING: '#00a8ff', LISTENING: '#00f5d4', OFFLINE: '#ff4d4d', RECONNECTING: '#ff4d4d', READY: '#00d4ff'};
+
+            function drawRing() {
+                _reactorDecay = Math.max(_reactorAudioLevel, _reactorDecay * 0.88);
+                const amp = _reactorDecay;
+                const state = document.getElementById('header-label')?.textContent || 'READY';
+                const color = levelMap[state] || '#00d4ff';
+                const baseR = 155;
+                const r = baseR + amp * 12;
+                circle.setAttribute('r', r);
+                circle.setAttribute('stroke', color);
+                circle.setAttribute('stroke-width', (1 + amp * 2.5).toFixed(1));
+                circle.setAttribute('stroke-dasharray', `${(8 + amp * 30).toFixed(0)} ${(4 + amp * 10).toFixed(0)}`);
+                circle.setAttribute('opacity', (0.25 + amp * 0.55).toFixed(2));
+                circle.setAttribute('filter', amp > 0.3 ? 'url(#ringGlow)' : 'none');
+                requestAnimationFrame(drawRing);
+            }
+            drawRing();
+        })();
+
+        // Patch the existing status update to also drive the reactive ring color
+        const _origSetStatus = setStatus;
+        setStatus = function(s) {
+            _origSetStatus(s);
+            // Trigger a brief pulse on the reactor wrap via CSS class
+            const center = document.getElementById('center-panel');
+            if (center) {
+                center.style.transition = 'box-shadow 0.3s ease';
+            }
+        };
+
+        // ============================================
         // BRIDGE HANDLERS (called from Python via QWebChannel)
         // ============================================
         function createMsg(cls, sender, text, streaming) {
@@ -1967,6 +2451,7 @@ function initBridge() {
 
     <div class="mem-bar" id="mem-bar-indicator">MEM: --</div>
 
+    <canvas id="particle-bg"></canvas>
     <div id="boot-overlay">
         <svg width="80" height="80" viewBox="0 0 300 300" style="margin-bottom:20px; filter:drop-shadow(0 0 20px rgba(0,212,255,0.4));">
             <defs>
@@ -1991,6 +2476,8 @@ function initBridge() {
         <div class="boot-bar"><div class="boot-bar-inner"></div></div>
     </div>
     <div id="toast-container"></div>
+    <!-- Quick command suggestions (shown when input is empty/focused) -->
+    <div class="suggestions-bar" id="suggestions-bar" style="display:none;"></div>
     <header>
         <div class="logo-block">
             <h1>J.A.R.V.I.S.</h1>
@@ -2980,6 +3467,203 @@ class JarvisCore:
             role="user"
         )
 
+    def _tool_get_battery_info(self) -> str:
+        """Detailed battery status: charge, time remaining, power status."""
+        try:
+            bat = psutil.sensors_battery()
+            if not bat:
+                return "Battery information not available (desktop system or unsupported)."
+            lines = [
+                f"Battery: {bat.percent}%",
+                f"Status: {'Charging' if bat.power_plugged else 'On battery'}",
+            ]
+            if bat.secsleft not in (psutil.POWER_TIME_UNKNOWN, psutil.POWER_TIME_UNLIMITED):
+                h, rem = divmod(bat.secsleft, 3600)
+                m, _ = divmod(rem, 60)
+                lines.append(f"Time remaining: {h}h {m}m")
+            else:
+                lines.append("Time remaining: Calculating..." if not bat.power_plugged else "Time remaining: --")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Battery check failed: {e}"
+
+    def _tool_get_cpu_temperature(self) -> str:
+        """CPU temperature sensors if available."""
+        try:
+            temps = psutil.sensors_temperatures()
+            if not temps:
+                return "CPU temperature sensors not available on this system."
+            lines = ["=== CPU Temperature Sensors ==="]
+            for name, entries in temps.items():
+                for e in entries[:3]:
+                    lines.append(f"  {name}: {e.current:.1f}{e.unit} (label: {e.label or 'N/A'})")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Temperature read failed: {e}"
+
+    def _tool_get_system_uptime(self) -> str:
+        """System uptime and boot time."""
+        try:
+            boot_time = psutil.boot_time()
+            uptime_sec = time.time() - boot_time
+            d, rem = divmod(uptime_sec, 86400)
+            h, rem = divmod(rem, 3600)
+            m, _ = divmod(rem, 60)
+            boot_str = datetime.datetime.fromtimestamp(boot_time).strftime("%Y-%m-%d %H:%M:%S")
+            return (f"System uptime: {int(d)}d {int(h)}h {int(m)}m\n"
+                    f"Boot time: {boot_str}")
+        except Exception as e:
+            return f"Uptime check failed: {e}"
+
+    def _tool_get_disk_details(self) -> str:
+        """Detailed disk usage for all mounted drives."""
+        try:
+            lines = ["=== Disk Usage ==="]
+            for part in psutil.disk_partitions(all=False):
+                try:
+                    usage = psutil.disk_usage(part.mountpoint)
+                    lines.append(
+                        f"  {part.device} ({part.mountpoint})"
+                        f" [{part.fstype}]"
+                        f" — {usage.used/(1024**3):.1f}/{usage.total/(1024**3):.1f} GB"
+                        f" ({usage.percent:.1f}%)"
+                    )
+                except (PermissionError, OSError):
+                    continue
+            return "\n".join(lines) or "No readable partitions found."
+        except Exception as e:
+            return f"Disk check failed: {e}"
+
+    def _tool_get_network_info(self) -> str:
+        """Detailed network interfaces and IP addresses."""
+        try:
+            lines = ["=== Network Interfaces ==="]
+            if_addrs = psutil.net_if_addrs()
+            if_stats = psutil.net_if_stats()
+            for name, addrs in if_addrs.items():
+                stats = if_stats.get(name)
+                status = f" [{'UP' if stats and stats.isup else 'DOWN'}]" if stats else ""
+                lines.append(f"\n  {name}{status}")
+                for addr in addrs:
+                    family = "IPv4" if addr.family == socket.AF_INET else "IPv6" if addr.family == socket.AF_INET6 else "MAC"
+                    lines.append(f"    {family}: {addr.address}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Network info failed: {e}"
+
+    def _tool_get_gps_clock(self) -> str:
+        """Get precise UTC time from NTP (GPS-equivalent time) and timezone info."""
+        try:
+            now = datetime.datetime.now(datetime.timezone.utc)
+            local = datetime.datetime.now()
+            tz_name = time.tzname[0] if time.daylight not in (0, None) else time.tzname[0]
+            # Try NTP sync for precision
+            if HAS_NTPLIB:
+                try:
+                    client = ntplib.NTPClient()
+                    resp = client.request('pool.ntp.org', version=3, timeout=3)
+                    ntp_time = datetime.datetime.fromtimestamp(resp.tx_time, tz=datetime.timezone.utc)
+                    return (f"=== Clock Sync ===\n"
+                            f"  Local:  {local.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                            f"  NTP:    {ntp_time.strftime('%Y-%m-%d %H:%M:%S.%f UTC')}\n"
+                            f"  Offset: {resp.offset*1000:.1f}ms\n"
+                            f"  Stratum: {resp.stratum}")
+                except Exception:
+                    pass  # fall through to local clock
+            return (f"=== Local Clock ===\n"
+                    f"  Time:   {now.strftime('%Y-%m-%d %H:%M:%S.%f UTC')}\n"
+                    f"  Local:  {local.strftime('%Y-%m-%d %H:%M:%S %Z')}\n"
+                    f"  TZ:     {tz_name}")
+        except Exception as e:
+            return f"Clock check failed: {e}"
+
+    def _tool_reboot_system(self) -> str:
+        """Initiate a system reboot (requires confirmation)."""
+        try:
+            if os.name == 'nt':
+                os.system('shutdown /r /t 30 /c "JARVIS system reboot"')
+                return "System reboot initiated (30s countdown)."
+            else:
+                os.system('sudo reboot')
+                return "Reboot command sent."
+        except Exception as e:
+            return f"Reboot failed: {e}"
+
+    def _tool_shutdown_system(self) -> str:
+        """Initiate a system shutdown (requires confirmation)."""
+        try:
+            if os.name == 'nt':
+                os.system('shutdown /s /t 30 /c "JARVIS system shutdown"')
+                return "System shutdown initiated (30s countdown)."
+            else:
+                os.system('sudo shutdown now')
+                return "Shutdown command sent."
+        except Exception as e:
+            return f"Shutdown failed: {e}"
+
+    def _tool_lock_screen(self) -> str:
+        """Lock the workstation screen."""
+        try:
+            if os.name == 'nt':
+                ctypes.windll.user32.LockWorkStation()
+                return "Workstation locked."
+            elif sys.platform == 'darwin':
+                subprocess.run(['pmset', 'displaysleepnow'])
+                return "Display locked."
+            else:
+                subprocess.run(['xdg-screensaver', 'lock'])
+                return "Screen lock initiated."
+        except Exception as e:
+            return f"Lock failed: {e}"
+
+    def _tool_get_top_apps(self, count: int = 10) -> str:
+        """Top processes sorted by resource usage."""
+        try:
+            count = max(1, min(20, int(count or 10)))
+            procs = []
+            for p in psutil.process_iter(attrs=["pid", "name", "cpu_percent", "memory_percent", "num_threads"]):
+                try:
+                    info = p.info
+                    cpu = info.get("cpu_percent") or 0.0
+                    mem = info.get("memory_percent") or 0.0
+                    if cpu > 0.1 or mem > 0.1:  # Filter noise
+                        procs.append({
+                            "pid": info.get("pid"),
+                            "name": info.get("name", "?"),
+                            "cpu": cpu,
+                            "mem": mem,
+                            "threads": info.get("num_threads", 0),
+                        })
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            procs.sort(key=lambda p: -(p["cpu"] + p["mem"]))
+            lines = [f"Top {min(count, len(procs))} processes (by CPU+MEM):"]
+            lines.append(f"  {'PID':>7}  {'CPU':>5}  {'MEM':>5}  {'THR':>4}  NAME")
+            for p in procs[:count]:
+                pid_s = f"{p['pid']:>7}" if p['pid'] else "      ?"
+                lines.append(f"  {pid_s}  {p['cpu']:>5.1f}  {p['mem']:>5.1f}  {p['threads']:>4}  {p['name']}")
+            return "\n".join(lines)
+        except Exception as e:
+            return f"Process list failed: {e}"
+
+    def _tool_kill_process(self, name: str) -> str:
+        """Kill a process by name (requires Windows admin for some)."""
+        if not name:
+            return "No process name provided."
+        name_lower = name.lower().strip()
+        killed = []
+        failed = []
+        for p in psutil.process_iter(attrs=["pid", "name"]):
+            try:
+                if name_lower in (p.info.get("name") or "").lower():
+                    p.kill()
+                    killed.append(p.info.get("name"))
+            except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                failed.append(f"{name} (PID {p.info.get('pid')}): {e}")
+        if killed:
+            return f"Killed: {', '.join(set(killed))}\n" + (f"Failed: {', '.join(failed)}" if failed else "")
+        return f"No running process matching '{name}' found."
+
     def _build_reconnect_summary(self):
         """Build a compressed summary of the FULL conversation history for
         context restoration on reconnect.
@@ -3703,6 +4387,30 @@ class JarvisCore:
                 result = await asyncio.to_thread(
                     self._tool_clipboard_history,
                     int(args.get("count", 10) or 10)
+                )
+            # ----- Advanced System dispatch -----
+            elif name == "get_battery_info":
+                result = await asyncio.to_thread(self._tool_get_battery_info)
+            elif name == "get_cpu_temperature":
+                result = await asyncio.to_thread(self._tool_get_cpu_temperature)
+            elif name == "get_system_uptime":
+                result = await asyncio.to_thread(self._tool_get_system_uptime)
+            elif name == "get_disk_details":
+                result = await asyncio.to_thread(self._tool_get_disk_details)
+            elif name == "get_network_info":
+                result = await asyncio.to_thread(self._tool_get_network_info)
+            elif name == "get_gps_clock":
+                result = await asyncio.to_thread(self._tool_get_gps_clock)
+            elif name == "get_top_apps":
+                result = await asyncio.to_thread(
+                    self._tool_get_top_apps,
+                    int(args.get("count", 10) or 10)
+                )
+            elif name == "lock_screen":
+                result = await asyncio.to_thread(self._tool_lock_screen)
+            elif name == "kill_process":
+                result = await asyncio.to_thread(
+                    self._tool_kill_process, args.get("name", "")
                 )
             elif name == "memory_usage":
                 result = await asyncio.to_thread(self._tool_memory_usage)
